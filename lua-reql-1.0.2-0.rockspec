@@ -2,16 +2,16 @@
 
 rockspec_format = '1.1'
 package = 'lua-reql'
-version = '1.0.1-0'
+version = '1.0.2-0'
 -- LuaDist source
 source = {
-  tag = "1.0.1-0",
+  tag = "1.0.2-0",
   url = "git://github.com/LuaDist-testing/lua-reql.git"
 }
 -- Original source
 -- source = {
 --   url = 'git://github.com/grandquista/Lua-ReQL',
---   branch = 'v1.0.1',
+--   branch = 'v1.0.2',
 -- }
 description = {
   summary = 'A Lua driver for RethinkDB.',
