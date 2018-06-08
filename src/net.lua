@@ -1,38 +1,27 @@
 local socket = require('socket')
-local util = require('./util')
-local err = require('./errors')
-local cursors = require('./cursor')
+local json = require('json')
+
+local errors = require('./errors')
+local Cursor = require('./cursor')
 local protodef = require('./proto')
-local protoVersion = protodef.Version.V0_3
-local protoProtocol = protodef.Protocol.JSON
-local protoQueryType = protodef.QueryType
-local protoResponseType = protodef.ResponseType
--- local r = require('./ast')
+local proto_version = protodef.Version.V0_3
+local proto_protocol = protodef.Protocol.JSON
+local proto_query_type = protodef.QueryType
+local proto_response_type = protodef.ResponseType
 
 -- Import some names to this namespace for convienience
-local mkAtom = util.mkAtom
-local mkErr = util.mkErr
-local isinstance = util.isinstance
-local is_array = util.is_array
+local mk_atom = errors.mk_atom
+local is_instance = errors.is_instance
+local is_array = errors.is_array
 
 local Connection
-local bytes_to_int, int_to_bytes, to_json, from_json
+local bytes_to_int, int_to_bytes
 
-function bytes_to_int(str, endian, signed) -- use length of string to determine 8,16,32,64 bits
+function bytes_to_int(str)
     local t = {str:byte(1,-1)}
-    if endian == "big" then --reverse bytes
-        local tt = {}
-        for k=1,#t do
-            tt[#t-k+1] = t[k]
-        end
-        t = tt
-    end
     local n = 0
     for k=1,#t do
         n = n + t[k] * 2 ^ ((k - 1) * 8)
-    end
-    if signed then
-        n = (n > 2 ^ (#t * 8 - 1) - 1) and (n - 2 ^ (#t * 8)) or n -- if last bit set, negative.
     end
     return n
 end
@@ -40,50 +29,12 @@ end
 function int_to_bytes(num, bytes)
     local res = {}
     local mul = 0
-    for k=bytes,1,-1 do -- 256 = 2^8 bits per char.
+    for k=bytes,1,-1 do
         mul = 2 ^ (8 * (k - 1))
         res[k] = math.floor(num / mul)
         num = math.fmod(num, mul)
     end
-    assert(num == 0)
     return string.char(unpack(res))
-end
-
-function to_json(obj)
-  if obj == nil then
-    return 'null'
-  end
-  if type(obj) == 'boolean' then
-    if obj then return 'true' end
-    return 'false'
-  end
-  if type(obj) == 'string' then
-    return obj
-  end
-  if type(obj) == 'number' then
-    return tostring(obj)
-  end
-  if is_array(obj) then
-    local res = '[' .. to_json(obj[1])
-    for k=2, #obj do
-      res = res .. ','  .. to_json(obj[k])
-    end
-    return res .. ']'
-  end
-  if type(obj) == 'tree' then
-    local res = '{'
-    local first = true
-    for k, v in ipairs(obj) do
-      if first then
-        res = res .. k .. ':' .. to_json(obj[k])
-        first = false
-      else
-        res = res .. ',' .. k .. ':' .. to_json(obj[k])
-      end
-    end
-    return res .. '}'
-  end
-  return '{}'
 end
 
 do
@@ -92,333 +43,225 @@ do
     DEFAULT_PORT = 28015,
     DEFAULT_AUTH_KEY = '',
     DEFAULT_TIMEOUT = 20, -- In seconds
-    _data = function(self, buf)
+    _get_response = function(self, reqest_token)
+      local response_length = 0
+      local token = 0
+      local buf, err, partial
       -- Buffer data, execute return results if need be
-      self.buffer = Buffer.concat({
-        self.buffer,
-        buf
-      })
-      while strlen(self.buffer) >= 12 do
-        local token = self.buffer.readUInt32LE(0) + 0x100000000 * self.buffer.readUInt32LE(4)
-        local responseLength = self.buffer.readUInt32LE(8)
-        if not (strlen(self.buffer) >= (12 + responseLength)) then
-          break
+      while true do
+        buf, err, partial = self.raw_socket:receive(1024)
+        buf = buf or partial
+        if (not buf) and err then
+          error(errors.ReQLDriverError('connection returned: ' .. err))
         end
-        local responseBuffer = self.buffer.slice(12, responseLength + 12)
-        local response = JSON.parse(responseBuffer)
-        self:_processResponse(response, token)
-        self.buffer = self.buffer.slice(12 + responseLength)
-      end
-    end,
-    _delQuery = function(self, token)
-      -- This query is done, delete this cursor
-      delete(self.outstandingCallbacks[token])
-      if #self.outstandingCallbacks < 1 and not self.open then
-        return self:cancel()
-      end
-    end,
-    _processResponse = function(self, response, token)
-      local profile = response.p
-      if self.outstandingCallbacks[token] then
-        local cb, root, cursor, opts, feed
-        do
-          local _obj_0 = self.outstandingCallbacks[token]
-          cb, root, cursor, opts, feed = _obj_0.cb, _obj_0.root, _obj_0.cursor, _obj_0.opts, _obj_0.feed
-        end
-        if cursor then
-          cursor._addResponse(response)
-          if cursor._endFlag and cursor._outstandingRequests == 0 then
-            return self:_delQuery(token)
+        self.buffer = self.buffer .. buf
+        if response_length > 0 then
+          if string.len(self.buffer) >= response_length then
+            local response_buffer = string.sub(self.buffer, 1, response_length)
+            self.buffer = string.sub(self.buffer, response_length + 1)
+            response_length = 0
+            self:_process_response(json.decode(response_buffer), token)
+            if token == reqest_token then return end
           end
         else
-          if feed then
-            feed._addResponse(response)
-            if feed._endFlag and feed._outstandingRequests == 0 then
-              return self:_delQuery(token)
-            end
-          else
-            if cb then
-              -- Behavior varies considerably based on response type
-              local _exp_0 = response.t
-              if protoResponseType.COMPILE_ERROR == _exp_0 then
-                cb(mkErr(err.ReQLCompileError, response, root))
-                return self:_delQuery(token)
-              elseif protoResponseType.CLIENT_ERROR == _exp_0 then
-                cb(mkErr(err.ReQLClientError, response, root))
-                return self:_delQuery(token)
-              elseif protoResponseType.RUNTIME_ERROR == _exp_0 then
-                cb(mkErr(err.ReQLRuntimeError, response, root))
-                return self:_delQuery(token)
-              elseif protoResponseType.SUCCESS_ATOM == _exp_0 then
-                response = mkAtom(response, opts)
-                if Array.isArray(response) then
-                  response = cursors.makeIterable(response)
-                end
-                if profile then
-                  response = {
-                    profile = profile,
-                    value = response
-                  }
-                end
-                cb(nil, response)
-                return self:_delQuery(token)
-              elseif protoResponseType.SUCCESS_PARTIAL == _exp_0 then
-                cursor = cursors.Cursor(self, token, opts, root)
-                self.outstandingCallbacks[token].cursor = cursor
-                if profile then
-                  return cb(nil, {
-                    profile = profile,
-                    value = cursor._addResponse(response)
-                  })
-                else
-                  return cb(nil, cursor._addResponse(response))
-                end
-              elseif protoResponseType.SUCCESS_SEQUENCE == _exp_0 then
-                cursor = cursors.Cursor(self, token, opts, root)
-                self:_delQuery(token)
-                if profile then
-                  return cb(nil, {
-                    profile = profile,
-                    value = cursor._addResponse(response)
-                  })
-                else
-                  return cb(nil, cursor._addResponse(response))
-                end
-              elseif protoResponseType.SUCCESS_FEED == _exp_0 then
-                feed = cursors.Feed(self, token, opts, root)
-                self.outstandingCallbacks[token].feed = feed
-                if profile then
-                  return cb(nil, {
-                    profile = profile,
-                    value = feed._addResponse(response)
-                  })
-                else
-                  return cb(nil, feed._addResponse(response))
-                end
-              elseif protoResponseType.WAIT_COMPLETE == _exp_0 then
-                self:_delQuery(token)
-                return cb(nil, nil)
-              else
-                return cb(err.ReQLDriverError("Unknown response type"))
-              end
-            end
+          if string.len(self.buffer) >= 12 then
+            token = bytes_to_int(self.buffer:sub(1, 8))
+            response_length = bytes_to_int(self.buffer:sub(9, 12))
+            self.buffer = self.buffer:sub(13)
+          end
+        end
+      end
+    end,
+    _del_query = function(self, token)
+      -- This query is done, delete this cursor
+      self.outstanding_callbacks[token] = {}
+    end,
+    _process_response = function(self, response, token)
+      local profile = response.p
+      if self.outstanding_callbacks[token] then
+        local root, cursor, opts
+        do
+          local _obj_0 = self.outstanding_callbacks[token]
+          root, cursor, opts = _obj_0.root, _obj_0.cursor, _obj_0.opts
+        end
+        if cursor then
+          cursor:_add_response(response)
+          if cursor._end_flag and cursor._outstanding_requests == 0 then
+            return self:_del_query(token)
           end
         end
       else
         -- Unexpected token
-        return self:emit('error', err.ReQLDriverError("Unexpected token " .. tostring(token) .. "."))
+        return error(errors.ReQLDriverError("Unexpected token " .. token .. "."))
       end
     end,
-    close = function(self, optsOrCallback, callback)
-      local opts, cb
+    close = function(self, opts_or_callback, callback)
+      local opts = {}
+      local cb
       if callback then
-        opts = optsOrCallback
+        if type(opts_or_callback) ~= 'table' then
+          error(errors.ReQLDriverError("First argument to two-argument `close` must be an object."))
+        end
+        opts = opts_or_callback
         cb = callback
       else
-        if type(optsOrCallback) == 'tree' then
-          opts = optsOrCallback
-          cb = nil
+        if type(opts_or_callback) == 'table' then
+          opts = opts_or_callback
         else
-          if type(optsOrCallback) == "function" then
-            opts = { }
-            cb = optsOrCallback
-          else
-            opts = { }
+          if type(opts_or_callback) == "function" then
+            cb = opts_or_callback
           end
         end
       end
-      local wrappedCb = function(self, ...)
-        self.rawSocket["end"]()
-        if cb then
-          return cb(unpack(arg))
-        end
+
+      if cb and type(cb) ~= 'function' then
+        error(errors.ReQLDriverError("First argument to two-argument `close` must be an object."))
       end
 
-      callback = wrappedCb
-
-      if callback then
-        local opts = optsOrCallback
-        if not (type(opts) == 'tree') then
-          error(err.ReQLDriverError("First argument to two-argument `close` must be an object."))
-        end
-        local cb = callback
-      else
-        if type(optsOrCallback) == 'tree' then
-          local opts = optsOrCallback
-          local cb = nil
-        else
-          if type(optsOrCallback) == 'function' then
-            local opts = { }
-            local cb = optsOrCallback
-          else
-            local opts = optsOrCallback
-            local cb = nil
-          end
-        end
-      end
-      for key, _ in ipairs(opts) do
-        if not (key == 'noreplyWait') then
-          error(err.ReQLDriverError("First argument to two-argument `close` must be { noreplyWait: <bool> }."))
-        end
-      end
-      local noreplyWait = ((not opts.noreplyWait) or opts.noreplyWait) and self.open
-      local wrappedCb = function(self, ...)
+      local wrapped_cb = function(...)
         self.open = false
+        self.raw_socket:shutdown()
+        self.raw_socket:close()
         if cb then
-          return cb(unpack(arg))
+          return cb(...)
         end
       end
-      if noreplyWait then
-        return self:noreplyWait(wrappedCb)
-      else
-        return wrappedCb()
+
+      local noreply_wait = opts.noreply_wait and self.open
+
+      if noreply_wait then
+        return self:noreply_wait(wrapped_cb)
       end
+      return wrapped_cb()
     end,
-    noreplyWait = function(self, callback)
+    noreply_wait = function(self, cb)
+      callback = function(err, cur)
+        if cur then
+          cur.each(function() end)
+        end
+        cb(err)
+      end
       if not (self.open) then
-        return callback(err.ReQLDriverError("Connection is closed."))
+        return callback(errors.ReQLDriverError("Connection is closed."))
       end
 
       -- Assign token
-      local token = self.nextToken
-      self.nextToken = self.nextToken + 1
+      local token = self.next_token
+      self.next_token = self.next_token + 1
 
       -- Construct query
       local query = { }
-      query.type = protoQueryType.NOREPLY_WAIT
+      query.type = proto_query_type.NOREPLY_WAIT
       query.token = token
 
       -- Save callback
-      self.outstandingCallbacks[token] = {
+      self.outstanding_callbacks[token] = {
         cb = callback,
         root = nil,
         opts = nil
       }
-      return self:_sendQuery(query)
+      return self:_send_query(query)
     end,
-    _writeQuery = function(self, token, data)
-      return self.rawSocket:send(int_to_bytes(token, 8) .. data)
-    end,
-    write = function(self, chunk)
-      local lengthBuffer = Buffer(4)
-      lengthBuffer.writeUInt32LE(strlen(chunk), 0)
-      self.rawSocket.write(lengthBuffer)
-      return self.rawSocket.write(chunk)
+    _write_query = function(self, token, data)
+      self.raw_socket:send(
+        int_to_bytes(token, 8) ..
+        int_to_bytes(#data, 4) ..
+        data
+      )
     end,
     cancel = function(self)
-      self.rawSocket.destroy()
-      self.outstandingCallbacks = { }
+      self.raw_socket.destroy()
+      self.outstanding_callbacks = { }
     end,
-    reconnect = function(self, optsOrCallback, callback)
+    reconnect = function(self, opts_or_callback, callback)
       if callback then
-        local opts = optsOrCallback
+        local opts = opts_or_callback
         local cb = callback
       else
-        if type(optsOrCallback) == "function" then
+        if type(opts_or_callback) == "function" then
           local opts = { }
-          local cb = optsOrCallback
+          local cb = opts_or_callback
         else
-          if optsOrCallback then
-            local opts = optsOrCallback
+          if opts_or_callback then
+            local opts = opts_or_callback
           else
             local opts = { }
           end
           local cb = callback
         end
       end
-      local closeCb = function(self, err)
+      local close_cb = function(self, err)
         if err then
           return cb(err)
         else
-          local constructCb = function(self)
+          local construct_cb = function(self)
             return self.constructor.call(self, {
               host = self.host,
               port = self.port
             }, cb)
           end
-          return setTimeout(constructCb, 0)
+          return set_timeout(construct_cb, 0)
         end
       end
-      return self:close(opts, closeCb)
+      return self:close(opts, close_cb)
     end,
     use = function(self, db)
       self.db = db
     end,
     _start = function(self, term, cb, opts)
       if not (self.open) then
-        error(err.ReQLDriverError("Connection is closed."))
+        cb(errors.ReQLDriverError("Connection is closed."))
       end
 
       -- Assign token
-      local token = self.nextToken
-      self.nextToken = self.nextToken + 1
+      local token = self.next_token
+      self.next_token = self.next_token + 1
 
       -- Construct query
       local query = { }
-      query.global_optargs = { }
-      query.type = protoQueryType.START
+      query.global_optargs = opts
+      query.type = proto_query_type.START
       query.query = term:build()
       query.token = token
       -- Set global options
       if self.db then
-        query.global_optargs['db'] = r.db(self.db):build()
-      end
-      if opts.useOutdated then
-        query.global_optargs['use_outdated'] = r.expr(not not opts.useOutdated):build()
-      end
-      if opts.noreply then
-        query.global_optargs['noreply'] = r.expr(not not opts.noreply):build()
-      end
-      if opts.profile then
-        query.global_optargs['profile'] = r.expr(not not opts.profile):build()
-      end
-      if opts.durability then
-        query.global_optargs['durability'] = r.expr(opts.durability):build()
-      end
-      if opts.batchConf then
-        query.global_optargs['batch_conf'] = r.expr(opts.batchConf):build()
-      end
-      if opts.arrayLimit then
-        query.global_optargs['array_limit'] = r.expr(opts.arrayLimit):build()
+        query.global_optargs.db = r.db(self.db):build()
       end
 
+      local cursor = Cursor(self, token, query.global_optargs, term)
+
       -- Save callback
-      if not opts.noreply then
-        self.outstandingCallbacks[token] = {
-          cb = cb,
+      do
+        local callback = {
           root = term,
-          opts = opts
+          opts = opts,
+          cursor = cursor
         }
+        self.outstanding_callbacks[token] = callback
       end
-      self:_sendQuery(query)
-      if opts.noreply and type(cb) == 'function' then
-        return cb(nil)
+      self:_send_query(query)
+      if type(cb) == 'function' and not opts.noreply then
+        local res = cb(nil, cursor)
+        cursor:close()
+        return res
       end
     end,
-    _continueQuery = function(self, token)
-      local query = {
-        type = protoQueryType.CONTINUE,
-        token = token
-      }
-      return self:_sendQuery(query)
+    _continue_query = function(self, token)
+      return self:_write_query(token, json.encode({proto_query_type.CONTINUE}))
     end,
-    _endQuery = function(self, token)
-      local query = {
-        type = protoQueryType.STOP,
-        token = token
-      }
-      return self:_sendQuery(query)
+    _end_query = function(self, token)
+      return self:_write_query(token, json.encode({proto_query_type.STOP}))
     end,
-    _sendQuery = function(self, query)
+    _send_query = function(self, query)
       -- Serialize query to JSON
       local data = {query.type}
       if query.query then
         data[2] = query.query
-        if query.global_optargs and #query.global_optargs > 0 then
+        if #query.global_optargs > 0 then
           data[3] = query.global_optargs
         end
       end
-      return self:_writeQuery(query.token, to_json(data))
+      self:_write_query(query.token, json.encode(data))
     end
   }
   _base_0.__index = _base_0
@@ -436,46 +279,47 @@ do
       self.host = host.host or self.DEFAULT_HOST
       self.port = host.port or self.DEFAULT_PORT
       self.db = host.db -- left nil if this is not set
-      self.authKey = host.authKey or self.DEFAULT_AUTH_KEY
+      self.auth_key = host.auth_key or self.DEFAULT_AUTH_KEY
       self.timeout = host.timeout or self.DEFAULT_TIMEOUT
-      self.outstandingCallbacks = { }
-      self.nextToken = 1
+      self.outstanding_callbacks = { }
+      self.next_token = 1
       self.open = false
       self.buffer = ''
       self._events = self._events or { }
-      local errCallback = function(self, e)
-        self:removeListener('connect', conCallback)
-        if isinstance(err.ReQLDriverError, e) then
+      local err_callback = function(self, e)
+        self:remove_listener('connect', con_callback)
+        if is_instance(errors.ReQLDriverError, e) then
           return callback(e)
         else
-          return callback(err.ReQLDriverError("Could not connect to " .. tostring(self.host) .. ":" .. tostring(self.port) .. ".\n" .. tostring(e.message)))
+          return callback(errors.ReQLDriverError("Could not connect to " .. tostring(self.host) .. ":" .. tostring(self.port) .. ".\n" .. tostring(e.message)))
         end
       end
-      if self.rawSocket then
+      if self.raw_socket then
         self:close({
-          noreplyWait = false
+          noreply_wait = false
         })
       end
-      self.rawSocket = socket.tcp()
-      self.rawSocket:settimeout(self.timeout)
-      local status, err = self.rawSocket:connect(self.host, self.port)
+      self.raw_socket = socket.tcp()
+      self.raw_socket:settimeout(self.timeout)
+      local status, err = self.raw_socket:connect(self.host, self.port)
       if status then
         -- Initialize connection with magic number to validate version
-        self.rawSocket:send(
-          int_to_bytes(protoVersion, 4) ..
-          int_to_bytes(self.authKey:len(), 4) ..
-          self.authKey ..
-          int_to_bytes(protoProtocol, 4)
+        self.raw_socket:send(
+          int_to_bytes(proto_version, 4) ..
+          int_to_bytes(self.auth_key:len(), 4) ..
+          self.auth_key ..
+          int_to_bytes(proto_protocol, 4)
         )
 
         -- Now we have to wait for a response from the server
         -- acknowledging the connection
         while 1 do
-          buf, e, partial = self.rawSocket:receive(8)
-          if buf or err == 'timeout' then
-            self.buffer = self.buffer .. (buf or partial)
+          buf, err, partial = self.raw_socket:receive(8)
+          buf = buf or partial
+          if buf then
+            self.buffer = self.buffer .. buf
           else
-            return callback(err.ReQLDriverError("Could not connect to " .. tostring(self.host) .. ":" .. tostring(self.port) .. ".\n" .. tostring(e)))
+            return callback(errors.ReQLDriverError("Could not connect to " .. tostring(self.host) .. ":" .. tostring(self.port) .. ".\n" .. tostring(e)))
           end
           i, j = buf:find("\0")
           if i then
@@ -484,9 +328,11 @@ do
             if status_str == "SUCCESS" then
               -- We're good, finish setting up the connection
               self.open = true
-              return callback(nil, self)
+              local res = callback(nil, self)
+              self:close({noreply_wait = false})
+              return res
             else
-              return callback(err.ReQLDriverError("Server dropped connection with message: \"" + status_str + "\""))
+              return callback(errors.ReQLDriverError("Server dropped connection with message: \"" + status_str + "\""))
             end
           end
         end
@@ -515,17 +361,17 @@ do
 end
 
 return {
-  isConnection = function(connection)
-    return isinstance(Connection, connection)
+  is_connection = function(connection)
+    return is_instance(Connection, connection)
   end,
 
   -- The main function of this module
-  connect = function(hostOrCallback, callback)
+  connect = function(host_or_callback, callback)
     local host = {}
-    if type(hostOrCallback) == 'function' then
-      callback = hostOrCallback
+    if type(host_or_callback) == 'function' then
+      callback = host_or_callback
     else
-      host = hostOrCallback
+      host = host_or_callback
     end
     return Connection(host, callback)
   end

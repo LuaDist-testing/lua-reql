@@ -1,3 +1,15 @@
+import util
+
+
+class TestConnection(util.LuaTestCase):
+    def test_basic(self):
+        self.assertEqual(self.run_lua('test_connection_basic'), 'SUCCESS')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+"""
 #!/usr/bin/env python
 ##
 # Tests the driver API for making connections and excercizes the networking code
@@ -42,10 +54,10 @@ if len(sys.argv) > 2:
 
 class TestCaseCompatible(unittest.TestCase):
     '''Compatibility shim for Python 2.6'''
-    
+
     def __init__(self, *args, **kwargs):
         super(TestCaseCompatible, self).__init__(*args, **kwargs)
-        
+
         if not hasattr(self, 'assertRaisesRegexp'):
             self.assertRaisesRegexp = self.replacement_assertRaisesRegexp
         if not hasattr(self, 'skipTest'):
@@ -54,18 +66,18 @@ class TestCaseCompatible(unittest.TestCase):
             self.assertGreaterEqual = self.replacement_assertGreaterEqual
         if not hasattr(self, 'assertLess'):
             self.assertLess = self.replacement_assertLess
-    
+
     def replacement_assertGreaterEqual(self, greater, lesser):
         if not greater >= lesser:
             raise AssertionError('%s not greater than or equal to %s' % (greater, lesser))
-    
+
     def replacement_assertLess(self, lesser, greater):
         if not greater > lesser:
             raise AssertionError('%s not less than %s' % (lesser, greater))
-    
+
     def replacement_skipTest(self, message):
         sys.stderr.write("%s " % message)
-    
+
     def replacement_assertRaisesRegexp(self, exception, regexp, callable_func, *args, **kwds):
         try:
             callable_func(*args, **kwds)
@@ -118,9 +130,9 @@ class TestNoConnection(TestCaseCompatible):
             r.connect, host="0.0.0.0", port=28015, auth_key="hunter2")
 
 class TestConnectionDefaultPort(TestCaseCompatible):
-    
+
     servers = None
-    
+
     def setUp(self):
         if not use_default_port:
             self.skipTest("Not testing default port")
@@ -533,3 +545,4 @@ if __name__ == '__main__':
     res = unittest.TextTestRunner(verbosity=2).run(suite)
     if not res.wasSuccessful():
         sys.exit(1)
+"""

@@ -1,13 +1,16 @@
-local util = require('./util')
-local err = require('./errors')
+local json = require('json')
+
+local errors = require('./errors')
 local net = require('./net')
-local protoTermType = require('./proto').TermType
+local proto_term_type = require('./proto').TermType
+
+local is_instance = errors.is_instance
+local is_array = errors.is_array
 
 -- rethinkdb is both the main export object for the module
--- and a function that shortcuts `r.expr`.
 local rethinkdb = { }
 
-local funcWrap, hasImplicit, intsp, kved, intspallargs, shouldWrap
+local func_wrap, has_implicit, intsp, kved, intspallargs, should_wrap
 
 local TermBase, RDBVal, DatumTerm, RDBOp, RDBOpWrap, MakeArray, MakeObject, Var
 local JavaScript, Http, Json, Binary, Args, UserError, Random, ImplicitVar, Db
@@ -32,45 +35,45 @@ local June, July, August, September, October, November, December
 
 -- Utilities
 
-function funcWrap(val)
+function func_wrap(val, optargs)
   if not val then
     -- Pass through the nil value so it's caught by
     -- the appropriate nil checker
     return val
   end
-  val = rethinkdb.expr(val)
-  local ivarScan = function(node)
-    if not isinstance(TermBase, node) then
+  val = rethinkdb.expr(val, nil, optargs)
+  function ivar_scan(node)
+    if not is_instance(TermBase, node) then
       return false
     end
-    if isinstance(ImplicitVar, node) then
+    if is_instance(ImplicitVar, node) then
       return true
     end
     for _, v in ipairs(node.args) do
-      if ivarScan(v) then
+      if ivar_scan(v) then
         return true
       end
     end
-    for k, v in ipairs(node.optargs) do
-      if ivarScan(v) then
+    for _, v in pairs(node.optargs) do
+      if ivar_scan(v) then
         return true
       end
     end
     return false
   end
-  if ivarScan(val) then
-    return Func({ }, function(x)
+  if ivar_scan(val) then
+    return Func(optargs, function(x)
       return val
     end)
   end
   return val
 end
-function hasImplicit(args)
+function has_implicit(args)
   -- args is an array of (strings and arrays)
   -- We recurse to look for `r.row` which is an implicit var
-  if type(args) == "tree" then
+  if type(args) == 'table' then
     for _, arg in ipairs(args) do
-      if hasImplicit(arg) == true then
+      if has_implicit(arg) == true then
         return true
       end
     end
@@ -86,7 +89,6 @@ end
 
 do
   local _base_0 = {
-    showRunWarning = true,
     run = function(self, connection, options, callback)
       -- Valid syntaxes are
       -- connection, callback
@@ -99,7 +101,7 @@ do
           callback = options
           options = { }
         else
-          options(err.ReQLDriverError("Second argument to `run` cannot be a function if a third argument is provided."))
+          options(errors.ReQLDriverError("Second argument to `run` cannot be a function if a third argument is provided."))
           return
         end
       else
@@ -109,38 +111,15 @@ do
         end
       end
 
-      if not callback then
-        callback = function(err, cur)
-          if err then error(err) end
+      if not net.is_connection(connection) then
+        if callback then
+          return callback(errors.ReQLDriverError("First argument to `run` must be an open connection."))
         end
+        return
       end
 
-      -- Check if the arguments are valid types
-      for key, _ in ipairs(options) do
-        if not ('useOutdated' == key or 'noreply' == key or 'timeFormat' == key or 'profile' == key or 'durability' == key or 'groupFormat' == key or 'binaryFormat' == key or 'batchConf' == key or 'arrayLimit' == key) then
-          callback(err.ReQLDriverError("Found " .. key .. " which is not a valid option. valid options are {useOutdated: <bool>, noreply: <bool>, timeFormat: <string>, groupFormat: <string>, binaryFormat: <string>, profile: <bool>, durability: <string>, arrayLimit: <number>}."))
-        end
-      end
-      if not net.isConnection(connection) then
-        callback(err.ReQLDriverError("First argument to `run` must be an open connection."))
-      end
-      if options.noreply == true or type(callback) == 'function' then
-        local status
-        status, err = pcall(connection:_start(self, callback, options))
-        if not (status) then
-          -- It was decided that, if we can, we prefer to invoke the callback
-          -- with any errors rather than throw them as normal exceptions.
-          -- Thus we catch errors here and invoke the callback instead of
-          -- letting the error bubble up.
-          if type(callback) == 'function' then
-            return callback(err)
-          end
-        end
-      end
+      return connection:_start(self, callback, options)
     end,
-    toString = function(self)
-      return err.printQuery(self)
-    end
   }
   _base_0.__index = _base_0
   local _class_0 = setmetatable({
@@ -228,7 +207,7 @@ do
         return Slice(opts, self, left, right_or_opts)
       else
         if right_or_opts then
-          if (type(right_or_opts) == 'tree') and (not isinstance(TermBase, right_or_opts)) then
+          if (type(right_or_opts) == 'table') and (not is_instance(TermBase, right_or_opts)) then
             return Slice(right_or_opts, self, left)
           else
             return Slice({ }, self, left, right_or_opts)
@@ -292,13 +271,13 @@ do
       return Between(opts, self, left, right)
     end,
     reduce = function(...)
-      return Reduce({ }, ...)
+      return Reduce({arity = 2}, ...)
     end,
     map = function(...)
       return Map({ }, ...)
     end,
     filter = function(self, predicate, opts)
-      return Filter(opts, self, funcWrap(predicate))
+      return Filter(opts, self, func_wrap(predicate))
     end,
     concat_map = function(...)
       return ConcatMap({ }, ...)
@@ -340,7 +319,7 @@ do
       return OuterJoin({ }, ...)
     end,
     eq_join = function(self, left_attr, right, opts)
-      return EqJoin(opts, self, funcWrap(left_attr), right)
+      return EqJoin(opts, self, func_wrap(left_attr), right)
     end,
     zip = function(...)
       return Zip({ }, ...)
@@ -355,29 +334,19 @@ do
       return TypeOf({ }, ...)
     end,
     update = function(self, func, opts)
-      return Update(opts, self, funcWrap(func))
+      return Update(opts, self, func_wrap(func))
     end,
     delete = function(self, opts)
       return Delete(opts, self)
     end,
     replace = function(self, func, opts)
-      return Replace(opts, self, funcWrap(func))
+      return Replace(opts, self, func_wrap(func))
     end,
     do_ = function(self, ...)
-      local args
-      do
-        local _accum_0 = { }
-        local _len_0 = 1
-        local _list_0 = arg
-        local _max_0 = (arg.n - 1)
-        for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-          local a = _list_0[_index_0]
-          _accum_0[_len_0] = a
-          _len_0 = _len_0 + 1
-        end
-        args = _accum_0
-      end
-      return FunCall({ }, funcWrap(arg[arg.n]), self, unpack(args))
+      local args = {...}
+      local func = func_wrap(args[args.n])
+      args[args.n] = nil
+      return FunCall({ }, func, self, unpack(args))
     end,
     default = function(...)
       return Default({ }, ...)
@@ -418,72 +387,38 @@ do
     group = function(self, ...)
       -- Default if no opts dict provided
       local opts = { }
-      local fields = arg
+      local fields = {...}
 
       -- Look for opts dict
-      if arg.n > 0 then
-        local perhapsOptDict = arg[arg.n]
-        if perhapsOptDict and (type(perhapsOptDict) == 'tree') and not (isinstance(TermBase, perhapsOptDict)) then
-          opts = perhapsOptDict
-          do
-            local _accum_0 = { }
-            local _len_0 = 1
-            local _list_0 = arg
-            local _max_0 = (arg.n - 1)
-            for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-              local a = _list_0[_index_0]
-              _accum_0[_len_0] = a
-              _len_0 = _len_0 + 1
-            end
-            fields = _accum_0
-          end
+      if fields.n > 0 then
+        local perhaps_opt_dict = fields[fields.n]
+        if perhaps_opt_dict and (type(perhaps_opt_dict) == 'table') and not (is_instance(TermBase, perhaps_opt_dict)) then
+          opts = perhaps_opt_dict
+          fields[fields.n] = nil
+          fields.n = fields.n - 1
         end
       end
-      do
-        local _accum_0 = { }
-        local _len_0 = 1
-        for i, field in ipairs(fields) do
-          _accum_0[_len_0] = funcWrap(field)
-          _len_0 = _len_0 + 1
-        end
-        fields = _accum_0
+      for i=1, fields.n do
+        fields[i] = func_wrap(fields[i])
       end
       return Group(opts, self, unpack(fields))
     end,
     order_by = function(self, ...)
       -- Default if no opts dict provided
       local opts = { }
-      local attrs = arg
+      local attrs = {...}
 
       -- Look for opts dict
-      local perhapsOptDict = arg[arg.n]
-      if perhapsOptDict and (type(perhapsOptDict) == 'tree') and not isinstance(TermBase, perhapsOptDict) then
-        opts = perhapsOptDict
-        do
-          local _accum_0 = { }
-          local _len_0 = 1
-          local _list_0 = arg
-          local _max_0 = (arg.n - 1)
-          for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-            local a = _list_0[_index_0]
-            _accum_0[_len_0] = a
-            _len_0 = _len_0 + 1
-          end
-          attrs = _accum_0
-        end
+      local perhaps_opt_dict = attrs[attrs.n]
+      if perhaps_opt_dict and (type(perhaps_opt_dict) == 'table') and not is_instance(TermBase, perhaps_opt_dict) then
+        opts = perhaps_opt_dict
+        attrs[attrs.n] = nil
+        attrs.n = attrs.n - 1
       end
-      do
-        local _accum_0 = { }
-        local _len_0 = 1
-        for i, attr in ipairs(attrs) do
-          if isinstance(Asc, attr) or isinstance(Desc, attr) then
-            _accum_0[_len_0] = attr
-          else
-            _accum_0[_len_0] = funcWrap(attr)
-          end
-          _len_0 = _len_0 + 1
+      for i, attr in ipairs(attrs) do
+        if not (is_instance(Asc, attr) or is_instance(Desc, attr)) then
+          attrs[i] = func_wrap(attr)
         end
-        attrs = _accum_0
       end
       return OrderBy(opts, self, unpack(attrs))
     end,
@@ -507,8 +442,8 @@ do
 
     -- Database operations
 
-    table_create = function(self, tblName, opts)
-      return TableCreate(opts, self, tblName)
+    table_create = function(self, tbl_name, opts)
+      return TableCreate(opts, self, tbl_name)
     end,
     table_drop = function(...)
       return TableDrop({ }, ...)
@@ -516,8 +451,8 @@ do
     table_list = function(...)
       return TableList({ }, ...)
     end,
-    table = function(self, tblName, opts)
-      return Table(opts, self, tblName)
+    table = function(self, tbl_name, opts)
+      return Table(opts, self, tbl_name)
     end,
 
     -- Table operations
@@ -528,25 +463,14 @@ do
     get_all = function(self, ...)
       -- Default if no opts dict provided
       local opts = { }
-      local keys = arg
+      local keys = {...}
 
       -- Look for opts dict
-      if arg.n > 1 then
-        local perhapsOptDict = arg[arg.n - 1]
-        if perhapsOptDict and ((type(perhapsOptDict) == 'tree') and not (isinstance(TermBase, perhapsOptDict))) then
-          opts = perhapsOptDict
-          do
-            local _accum_0 = { }
-            local _len_0 = 1
-            local _list_0 = arg
-            local _max_0 = (arg.n - 1)
-            for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-              local a = _list_0[_index_0]
-              _accum_0[_len_0] = a
-              _len_0 = _len_0 + 1
-            end
-            keys = _accum_0
-          end
+      if keys.n > 1 then
+        local perhaps_opt_dict = keys[keys.n]
+        if perhaps_opt_dict and ((type(perhaps_opt_dict) == 'table') and not (is_instance(TermBase, perhaps_opt_dict))) then
+          opts = perhaps_opt_dict
+          keys[keys.n] = nil
         end
       end
       return GetAll(opts, self, unpack(keys))
@@ -556,14 +480,14 @@ do
     end,
     index_create = function(self, name, defun_or_opts, opts)
       if opts then
-        return IndexCreate(opts, self, name, funcWrap(defun_or_opts))
+        return IndexCreate(opts, self, name, func_wrap(defun_or_opts))
       else
         if defun_or_opts then
           -- FIXME?
-          if (type(defun_or_opts) == 'tree') and not isinstance(Function, defun_or_opts) and not isinstance(TermBase, defun_or_opts) then
+          if (type(defun_or_opts) == 'table') and not is_instance(Function, defun_or_opts) and not is_instance(TermBase, defun_or_opts) then
             return IndexCreate(defun_or_opts, self, name)
           else
-            return IndexCreate({ }, self, name, funcWrap(defun_or_opts))
+            return IndexCreate({ }, self, name, func_wrap(defun_or_opts))
           end
         else
           return IndexCreate({ }, self, name)
@@ -646,9 +570,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "RDBVal",
     __parent = _parent_0
@@ -681,17 +602,18 @@ do
     compose = function(self)
       local _exp_0 = type(self.data)
       if 'string' == _exp_0 then
-        return '"' + self.data + '"'
+        return '"' .. self.data .. '"'
       else
-        return '' + self.data
+        return '' .. self.data
       end
     end,
     build = function(self)
       if type(self.data) == 'number' then
         if math.abs(self.data) == 1/0 or self.data == ((1/0) * 0) then
-          error(TypeError("Illegal non-finite number `" .. self.data:toString() .. "`."))
+          error(TypeError("Illegal non-finite number `" .. self.data:tostring() .. "`."))
         end
       end
+      if self.data == nil then return json.null end
       return self.data
     end
   }
@@ -734,14 +656,15 @@ do
       for i, arg in ipairs(self.args) do
         args[i] = arg:build()
       end
-      if table.getn(self.optargs) > 0 then
+      res = {self.tt, args}
+      if #self.optargs > 0 then
         local opts = { }
-        for key, val in ipairs(self.optargs) do
+        for key, val in pairs(self.optargs) do
           opts[key] = val:build()
         end
-        return {self.tt, args, opts}
+        table.insert(res, opts)
       end
-      return {self.tt, args}
+      return res
     end,
     compose = function(self, args, optargs)
       if self.st then
@@ -753,25 +676,24 @@ do
           ')'
         }
       else
-        if shouldWrap(self.args[0]) then
-          args[0] = {
+        if self.args then
+        if should_wrap(self.args[1]) then
+          args[1] = {
             'r(',
-            args[0],
+            args[1],
             ')'
           }
         end
+        end
         return {
-          args[0],
+          args[1],
           '.',
           self.mt,
           '(',
           intspallargs((function()
             local _accum_0 = { }
-            local _len_0 = 1
             for _index_0 = 2, #args do
-              local a = args[_index_0]
-              _accum_0[_len_0] = a
-              _len_0 = _len_0 + 1
+              _accum_0[_index_0 - 1] = args[_index_0]
             end
             return _accum_0
           end)(), optargs),
@@ -784,13 +706,12 @@ do
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
     __init = function(self, optargs, ...)
-      for i, a in ipairs(arg) do
-        arg[i] = rethinkdb.expr(a)
+      self.args = {...}
+      for i, a in ipairs(self.args) do
+        self.args[i] = rethinkdb.expr(a)
       end
-      self.args = arg
       if optargs == nil then optargs = {} end
       self.optargs = optargs
-      return self
     end,
     __base = _base_0,
     __name = "RDBOp",
@@ -826,7 +747,7 @@ do
       self = _parent_0.__init(self)
       self.args = {}
       for i, a in ipairs(arg) do
-        self.args[i] = rethinkdb.expr(funcWrap(a))
+        self.args[i] = rethinkdb.expr(func_wrap(optargs, a))
       end
       if optargs == nil then optargs = {} end
       self.optargs = optargs
@@ -857,15 +778,15 @@ do
   RDBOpWrap = _class_0
 end
 function intsp(seq)
-  if not (seq[0]) then
+  if seq[1] == nil then
     return { }
   end
   local res = {
     seq[1]
   }
   for _index_0 = 2, #seq do
-    local e = seq[_index_0]
-    res.push(', ', e)
+    table.insert(res, ', ')
+    table.insert(res, seq[_index_0])
   end
   return res
 end
@@ -875,7 +796,7 @@ function kved(optargs)
     intsp((function()
       local _accum_0 = { }
       local _len_0 = 1
-      for k, v in ipairs(optargs) do
+      for k, v in pairs(optargs) do
         _accum_0[_len_0] = {
           k,
           ': ',
@@ -891,23 +812,23 @@ end
 function intspallargs(args, optargs)
   local argrepr = { }
   if #args > 0 then
-    argrepr.push(intsp(args))
+    table.insert(argrepr, intsp(args))
   end
-  if #optargs > 0 then
+  if optargs and #optargs > 0 then
     if #argrepr > 0 then
-      argrepr.push(', ')
+      table.insert(argrepr, ', ')
     end
-    argrepr.push(kved(optargs))
+    table.insert(argrepr, kved(optargs))
   end
   return argrepr
 end
-function shouldWrap(arg)
-  return isinstance(DatumTerm, arg) or isinstance(MakeArray, arg) or isinstance(MakeObject, arg)
+function should_wrap(arg)
+  return is_instance(DatumTerm, arg) or is_instance(MakeArray, arg) or is_instance(MakeObject, arg)
 end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MAKE_ARRAY,
+    tt = proto_term_type.MAKE_ARRAY,
     st = '[...]', -- This is only used by the `nil` argument checker
     compose = function(self, args)
       return {
@@ -920,9 +841,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "MakeArray",
     __parent = _parent_0
@@ -950,14 +868,14 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MAKE_OBJECT,
+    tt = proto_term_type.MAKE_OBJECT,
     st = '{...}', -- This is only used by the `nil` argument checker
     compose = function(self, args, optargs)
       return kved(optargs)
     end,
     build = function(self)
       local res = { }
-      for key, val in ipairs(self.optargs) do
+      for key, val in pairs(self.optargs) do
         res[key] = val:build()
       end
       return res
@@ -966,19 +884,12 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, obj, nestingDepth)
-      if nestingDepth == nil then
-        nestingDepth = 20
-      end
-      self = _parent_0.__init(self, { })
+    __init = function(self, obj, nesting_depth)
+      self.args = {}
       self.optargs = { }
-      for key, val in ipairs(obj) do
-        if not (val) then
-          error(err.ReQLDriverError("Object field '" .. tostring(key) .. "' may not be nil"))
-        end
-        self.optargs[key] = rethinkdb.expr(val, nestingDepth - 1)
+      for key, val in pairs(obj) do
+        self.optargs[key] = rethinkdb.expr(val, nesting_depth - 1)
       end
-      return self
     end,
     __base = _base_0,
     __name = "MakeObject",
@@ -1007,19 +918,18 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.VAR,
+    tt = proto_term_type.VAR,
     compose = function(self, args)
-      return {
-        'var_' .. args
-      }
+      if not args then return {} end
+      for i, v in ipairs(args) do
+        args[i] = 'var_' .. v
+      end
+      return args
     end
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Var",
     __parent = _parent_0
@@ -1047,15 +957,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.JAVASCRIPT,
+    tt = proto_term_type.JAVASCRIPT,
     st = 'js'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "JavaScript",
     __parent = _parent_0
@@ -1083,15 +990,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.HTTP,
+    tt = proto_term_type.HTTP,
     st = 'http'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Http",
     __parent = _parent_0
@@ -1119,15 +1023,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.JSON,
+    tt = proto_term_type.JSON,
     st = 'json'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Json",
     __parent = _parent_0
@@ -1155,7 +1056,7 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.BINARY,
+    tt = proto_term_type.BINARY,
     st = 'binary',
     compose = function(self)
       if #self.args == 0 then
@@ -1180,12 +1081,12 @@ do
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
     __init = function(self, data)
-      if isinstance(TermBase, data) then
+      if is_instance(TermBase, data) then
         local self = _parent_0.__init(self, { }, data)
       else
-        if isinstance(Buffer, data) then
+        if is_instance(Buffer, data) then
           local self = _parent_0.__init(self)
-          self.base64_data = data.toString("base64")
+          self.base64_data = data.tostring("base64")
         else
           error(TypeError("Parameter to `r.binary` must be a Buffer object or ReQL query."))
         end
@@ -1219,15 +1120,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ARGS,
+    tt = proto_term_type.ARGS,
     st = 'args'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Args",
     __parent = _parent_0
@@ -1255,15 +1153,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ERROR,
+    tt = proto_term_type.ERROR,
     st = 'error'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "UserError",
     __parent = _parent_0
@@ -1291,15 +1186,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.RANDOM,
+    tt = proto_term_type.RANDOM,
     st = 'random'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Random",
     __parent = _parent_0
@@ -1327,7 +1219,7 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.IMPLICIT_VAR,
+    tt = proto_term_type.IMPLICIT_VAR,
     compose = function(self)
       return {
         'r.row'
@@ -1337,9 +1229,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ImplicitVar",
     __parent = _parent_0
@@ -1367,15 +1256,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DB,
+    tt = proto_term_type.DB,
     st = 'db'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Db",
     __parent = _parent_0
@@ -1403,10 +1289,10 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TABLE,
+    tt = proto_term_type.TABLE,
     st = 'table',
     compose = function(self, args, optargs)
-      if isinstance(Db, self.args[0]) then
+      if is_instance(Db, self.args[0]) then
         return {
           args[0],
           '.table(',
@@ -1434,9 +1320,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Table",
     __parent = _parent_0
@@ -1464,15 +1347,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GET,
+    tt = proto_term_type.GET,
     mt = 'get'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Get",
     __parent = _parent_0
@@ -1500,15 +1380,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GET_ALL,
+    tt = proto_term_type.GET_ALL,
     mt = 'get_all'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "GetAll",
     __parent = _parent_0
@@ -1536,15 +1413,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.EQ,
+    tt = proto_term_type.EQ,
     mt = 'eq'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Eq",
     __parent = _parent_0
@@ -1572,15 +1446,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.NE,
+    tt = proto_term_type.NE,
     mt = 'ne'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Ne",
     __parent = _parent_0
@@ -1608,15 +1479,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.LT,
+    tt = proto_term_type.LT,
     mt = 'lt'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Lt",
     __parent = _parent_0
@@ -1644,15 +1512,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.LE,
+    tt = proto_term_type.LE,
     mt = 'le'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Le",
     __parent = _parent_0
@@ -1680,15 +1545,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GT,
+    tt = proto_term_type.GT,
     mt = 'gt'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Gt",
     __parent = _parent_0
@@ -1716,15 +1578,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GE,
+    tt = proto_term_type.GE,
     mt = 'ge'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Ge",
     __parent = _parent_0
@@ -1752,15 +1611,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.NOT,
+    tt = proto_term_type.NOT,
     mt = 'not_'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Not",
     __parent = _parent_0
@@ -1788,15 +1644,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ADD,
+    tt = proto_term_type.ADD,
     mt = 'add'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Add",
     __parent = _parent_0
@@ -1824,15 +1677,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SUB,
+    tt = proto_term_type.SUB,
     mt = 'sub'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Sub",
     __parent = _parent_0
@@ -1860,15 +1710,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MUL,
+    tt = proto_term_type.MUL,
     mt = 'mul'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Mul",
     __parent = _parent_0
@@ -1896,15 +1743,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DIV,
+    tt = proto_term_type.DIV,
     mt = 'div'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Div",
     __parent = _parent_0
@@ -1932,15 +1776,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MOD,
+    tt = proto_term_type.MOD,
     mt = 'mod'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Mod",
     __parent = _parent_0
@@ -1968,15 +1809,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.APPEND,
+    tt = proto_term_type.APPEND,
     mt = 'append'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Append",
     __parent = _parent_0
@@ -2004,15 +1842,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.PREPEND,
+    tt = proto_term_type.PREPEND,
     mt = 'prepend'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Prepend",
     __parent = _parent_0
@@ -2040,15 +1875,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DIFFERENCE,
+    tt = proto_term_type.DIFFERENCE,
     mt = 'difference'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Difference",
     __parent = _parent_0
@@ -2076,15 +1908,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SET_INSERT,
+    tt = proto_term_type.SET_INSERT,
     mt = 'set_insert'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "SetInsert",
     __parent = _parent_0
@@ -2112,15 +1941,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SET_UNION,
+    tt = proto_term_type.SET_UNION,
     mt = 'set_union'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "SetUnion",
     __parent = _parent_0
@@ -2148,15 +1974,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SET_INTERSECTION,
+    tt = proto_term_type.SET_INTERSECTION,
     mt = 'set_intersection'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "SetIntersection",
     __parent = _parent_0
@@ -2184,15 +2007,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SET_DIFFERENCE,
+    tt = proto_term_type.SET_DIFFERENCE,
     mt = 'set_difference'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "SetDifference",
     __parent = _parent_0
@@ -2220,15 +2040,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SLICE,
+    tt = proto_term_type.SLICE,
     mt = 'slice'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Slice",
     __parent = _parent_0
@@ -2256,15 +2073,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SKIP,
+    tt = proto_term_type.SKIP,
     mt = 'skip'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Skip",
     __parent = _parent_0
@@ -2292,15 +2106,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.LIMIT,
+    tt = proto_term_type.LIMIT,
     mt = 'limit'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Limit",
     __parent = _parent_0
@@ -2328,15 +2139,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GET_FIELD,
+    tt = proto_term_type.GET_FIELD,
     mt = 'get_field'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "GetField",
     __parent = _parent_0
@@ -2364,7 +2172,7 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.BRACKET,
+    tt = proto_term_type.BRACKET,
     st = '(...)', -- This is only used by the `nil` argument checker
     compose = function(self, args)
       return {
@@ -2378,9 +2186,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Bracket",
     __parent = _parent_0
@@ -2408,15 +2213,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.CONTAINS,
+    tt = proto_term_type.CONTAINS,
     mt = 'contains'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Contains",
     __parent = _parent_0
@@ -2444,15 +2246,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INSERT_AT,
+    tt = proto_term_type.INSERT_AT,
     mt = 'insert_at'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "InsertAt",
     __parent = _parent_0
@@ -2480,15 +2279,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SPLICE_AT,
+    tt = proto_term_type.SPLICE_AT,
     mt = 'splice_at'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "SpliceAt",
     __parent = _parent_0
@@ -2516,15 +2312,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DELETE_AT,
+    tt = proto_term_type.DELETE_AT,
     mt = 'delete_at'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DeleteAt",
     __parent = _parent_0
@@ -2552,15 +2345,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.CHANGE_AT,
+    tt = proto_term_type.CHANGE_AT,
     mt = 'change_at'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ChangeAt",
     __parent = _parent_0
@@ -2588,15 +2378,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.CONTAINS,
+    tt = proto_term_type.CONTAINS,
     mt = 'contains'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Contains",
     __parent = _parent_0
@@ -2624,15 +2411,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.HAS_FIELDS,
+    tt = proto_term_type.HAS_FIELDS,
     mt = 'has_fields'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "HasFields",
     __parent = _parent_0
@@ -2660,15 +2444,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.WITH_FIELDS,
+    tt = proto_term_type.WITH_FIELDS,
     mt = 'with_fields'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "WithFields",
     __parent = _parent_0
@@ -2696,15 +2477,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.KEYS,
+    tt = proto_term_type.KEYS,
     mt = 'keys'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Keys",
     __parent = _parent_0
@@ -2732,15 +2510,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.CHANGES,
+    tt = proto_term_type.CHANGES,
     mt = 'changes'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Changes",
     __parent = _parent_0
@@ -2768,15 +2543,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.OBJECT,
+    tt = proto_term_type.OBJECT,
     mt = 'object'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Object",
     __parent = _parent_0
@@ -2804,15 +2576,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.PLUCK,
+    tt = proto_term_type.PLUCK,
     mt = 'pluck'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Pluck",
     __parent = _parent_0
@@ -2840,15 +2609,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.INDEXES_OF,
+    tt = proto_term_type.INDEXES_OF,
     mt = 'indexes_of'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexesOf",
     __parent = _parent_0
@@ -2876,15 +2642,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.WITHOUT,
+    tt = proto_term_type.WITHOUT,
     mt = 'without'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Without",
     __parent = _parent_0
@@ -2912,15 +2675,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.MERGE,
+    tt = proto_term_type.MERGE,
     mt = 'merge'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Merge",
     __parent = _parent_0
@@ -2948,15 +2708,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.BETWEEN,
+    tt = proto_term_type.BETWEEN,
     mt = 'between'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Between",
     __parent = _parent_0
@@ -2984,15 +2741,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.REDUCE,
+    tt = proto_term_type.REDUCE,
     mt = 'reduce'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Reduce",
     __parent = _parent_0
@@ -3020,15 +2774,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.MAP,
+    tt = proto_term_type.MAP,
     mt = 'map'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Map",
     __parent = _parent_0
@@ -3056,15 +2807,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FILTER,
+    tt = proto_term_type.FILTER,
     mt = 'filter'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Filter",
     __parent = _parent_0
@@ -3092,15 +2840,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.CONCATMAP,
+    tt = proto_term_type.CONCATMAP,
     mt = 'concat_map'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ConcatMap",
     __parent = _parent_0
@@ -3128,15 +2873,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ORDERBY,
+    tt = proto_term_type.ORDERBY,
     mt = 'order_by'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "OrderBy",
     __parent = _parent_0
@@ -3164,15 +2906,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DISTINCT,
+    tt = proto_term_type.DISTINCT,
     mt = 'distinct'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Distinct",
     __parent = _parent_0
@@ -3200,15 +2939,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.COUNT,
+    tt = proto_term_type.COUNT,
     mt = 'count'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Count",
     __parent = _parent_0
@@ -3236,15 +2972,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.UNION,
+    tt = proto_term_type.UNION,
     mt = 'union'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Union",
     __parent = _parent_0
@@ -3272,15 +3005,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.NTH,
+    tt = proto_term_type.NTH,
     mt = 'nth'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Nth",
     __parent = _parent_0
@@ -3308,15 +3038,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MATCH,
+    tt = proto_term_type.MATCH,
     mt = 'match'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Match",
     __parent = _parent_0
@@ -3344,15 +3071,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.SPLIT,
+    tt = proto_term_type.SPLIT,
     mt = 'split'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Split",
     __parent = _parent_0
@@ -3380,15 +3104,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.UPCASE,
+    tt = proto_term_type.UPCASE,
     mt = 'upcase'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Upcase",
     __parent = _parent_0
@@ -3416,15 +3137,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DOWNCASE,
+    tt = proto_term_type.DOWNCASE,
     mt = 'downcase'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Downcase",
     __parent = _parent_0
@@ -3452,15 +3170,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.IS_EMPTY,
+    tt = proto_term_type.IS_EMPTY,
     mt = 'is_empty'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IsEmpty",
     __parent = _parent_0
@@ -3488,15 +3203,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GROUP,
+    tt = proto_term_type.GROUP,
     mt = 'group'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Group",
     __parent = _parent_0
@@ -3524,15 +3236,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.SUM,
+    tt = proto_term_type.SUM,
     mt = 'sum'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Sum",
     __parent = _parent_0
@@ -3560,15 +3269,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.AVG,
+    tt = proto_term_type.AVG,
     mt = 'avg'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Avg",
     __parent = _parent_0
@@ -3596,15 +3302,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.MIN,
+    tt = proto_term_type.MIN,
     mt = 'min'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Min",
     __parent = _parent_0
@@ -3632,15 +3335,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.MAX,
+    tt = proto_term_type.MAX,
     mt = 'max'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Max",
     __parent = _parent_0
@@ -3668,15 +3368,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INNER_JOIN,
+    tt = proto_term_type.INNER_JOIN,
     mt = 'inner_join'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "InnerJoin",
     __parent = _parent_0
@@ -3704,15 +3401,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.OUTER_JOIN,
+    tt = proto_term_type.OUTER_JOIN,
     mt = 'outer_join'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "OuterJoin",
     __parent = _parent_0
@@ -3740,15 +3434,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.EQ_JOIN,
+    tt = proto_term_type.EQ_JOIN,
     mt = 'eq_join'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "EqJoin",
     __parent = _parent_0
@@ -3776,15 +3467,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ZIP,
+    tt = proto_term_type.ZIP,
     mt = 'zip'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Zip",
     __parent = _parent_0
@@ -3812,15 +3500,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.COERCE_TO,
+    tt = proto_term_type.COERCE_TO,
     mt = 'coerce_to'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "CoerceTo",
     __parent = _parent_0
@@ -3848,15 +3533,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.UNGROUP,
+    tt = proto_term_type.UNGROUP,
     mt = 'ungroup'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Ungroup",
     __parent = _parent_0
@@ -3884,15 +3566,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TYPEOF,
+    tt = proto_term_type.TYPEOF,
     mt = 'type_of'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "TypeOf",
     __parent = _parent_0
@@ -3920,15 +3599,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INFO,
+    tt = proto_term_type.INFO,
     mt = 'info'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Info",
     __parent = _parent_0
@@ -3956,15 +3632,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SAMPLE,
+    tt = proto_term_type.SAMPLE,
     mt = 'sample'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Sample",
     __parent = _parent_0
@@ -3992,15 +3665,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.UPDATE,
+    tt = proto_term_type.UPDATE,
     mt = 'update'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Update",
     __parent = _parent_0
@@ -4028,15 +3698,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DELETE,
+    tt = proto_term_type.DELETE,
     mt = 'delete'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Delete",
     __parent = _parent_0
@@ -4064,15 +3731,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.REPLACE,
+    tt = proto_term_type.REPLACE,
     mt = 'replace'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Replace",
     __parent = _parent_0
@@ -4100,15 +3764,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INSERT,
+    tt = proto_term_type.INSERT,
     mt = 'insert'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Insert",
     __parent = _parent_0
@@ -4136,15 +3797,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DB_CREATE,
+    tt = proto_term_type.DB_CREATE,
     st = 'db_create'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DbCreate",
     __parent = _parent_0
@@ -4172,15 +3830,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DB_DROP,
+    tt = proto_term_type.DB_DROP,
     st = 'db_drop'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DbDrop",
     __parent = _parent_0
@@ -4208,15 +3863,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DB_LIST,
+    tt = proto_term_type.DB_LIST,
     st = 'db_list'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DbList",
     __parent = _parent_0
@@ -4244,15 +3896,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TABLE_CREATE,
+    tt = proto_term_type.TABLE_CREATE,
     mt = 'table_create'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "TableCreate",
     __parent = _parent_0
@@ -4280,15 +3929,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TABLE_DROP,
+    tt = proto_term_type.TABLE_DROP,
     mt = 'table_drop'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "TableDrop",
     __parent = _parent_0
@@ -4316,15 +3962,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TABLE_LIST,
+    tt = proto_term_type.TABLE_LIST,
     mt = 'table_list'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "TableList",
     __parent = _parent_0
@@ -4352,15 +3995,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_CREATE,
+    tt = proto_term_type.INDEX_CREATE,
     mt = 'index_create'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexCreate",
     __parent = _parent_0
@@ -4388,15 +4028,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_DROP,
+    tt = proto_term_type.INDEX_DROP,
     mt = 'index_drop'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexDrop",
     __parent = _parent_0
@@ -4424,15 +4061,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_RENAME,
+    tt = proto_term_type.INDEX_RENAME,
     mt = 'index_rename'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexRename",
     __parent = _parent_0
@@ -4460,15 +4094,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_LIST,
+    tt = proto_term_type.INDEX_LIST,
     mt = 'index_list'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexList",
     __parent = _parent_0
@@ -4496,15 +4127,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_STATUS,
+    tt = proto_term_type.INDEX_STATUS,
     mt = 'index_status'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexStatus",
     __parent = _parent_0
@@ -4532,15 +4160,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INDEX_WAIT,
+    tt = proto_term_type.INDEX_WAIT,
     mt = 'index_wait'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "IndexWait",
     __parent = _parent_0
@@ -4568,15 +4193,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SYNC,
+    tt = proto_term_type.SYNC,
     mt = 'sync'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Sync",
     __parent = _parent_0
@@ -4604,7 +4226,7 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FUNCALL,
+    tt = proto_term_type.FUNCALL,
     st = 'do_', -- This is only used by the `nil` argument checker
     compose = function(self, args)
       if #args > 2 then
@@ -4625,7 +4247,7 @@ do
           ')'
         }
       else
-        if shouldWrap(self.args[1]) then
+        if should_wrap(self.args[1]) then
           args[1] = {
             'r(',
             args[1],
@@ -4644,9 +4266,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "FunCall",
     __parent = _parent_0
@@ -4674,15 +4293,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DEFAULT,
+    tt = proto_term_type.DEFAULT,
     mt = 'default'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Default",
     __parent = _parent_0
@@ -4710,15 +4326,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.BRANCH,
+    tt = proto_term_type.BRANCH,
     st = 'branch'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Branch",
     __parent = _parent_0
@@ -4746,15 +4359,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ANY,
+    tt = proto_term_type.ANY,
     mt = 'or_'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Any",
     __parent = _parent_0
@@ -4782,15 +4392,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ALL,
+    tt = proto_term_type.ALL,
     mt = 'and_'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "All",
     __parent = _parent_0
@@ -4818,15 +4425,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.FOREACH,
+    tt = proto_term_type.FOREACH,
     mt = 'for_each'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ForEach",
     __parent = _parent_0
@@ -4854,24 +4458,24 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FUNC,
+    tt = proto_term_type.FUNC,
     compose = function(self, args)
-      if hasImplicit(args[1]) == true then
+      if has_implicit(args[1]) then
         return {
           args[1]
         }
       else
-        local varStr = ""
-        for arg, i in ipairs(args[0][1]) do -- ['0', ', ', '1']
+        local var_str = ""
+        for i, arg in ipairs(args[1][2]) do -- ['0', ', ', '1']
           if i % 2 == 0 then
-            varStr = varStr + Var.compose(arg)
+            var_str = var_str .. Var.compose(arg)
           else
-            varStr = varStr + arg
+            var_str = var_str .. arg
           end
         end
         return {
           'function(',
-          varStr,
+          var_str,
           ') { return ',
           args[1],
           '; }'
@@ -4884,20 +4488,20 @@ do
   local _class_0 = setmetatable({
     __init = function(self, optargs, func)
       local args = { }
-      local argNums = { }
-      local i = 0
-      while i < func.length do
-        argNums.push(Func.nextVarId)
-        args.push(Var({ }, Func.nextVarId))
-        Func.nextVarId = Func.nextVarId + 1
-        i = i + 1
+      local arg_nums = { }
+      if not optargs then optargs = {} end
+      for i=1, optargs.arity or 1 do
+        table.insert(arg_nums, Func.next_var_id)
+        table.insert(args, Var({ }, Func.next_var_id))
+        Func.next_var_id = Func.next_var_id + 1
       end
       local body = func(unpack(args))
       if not body then
-        error(err.ReQLDriverError("Anonymous function returned `nil`. Did you forget a `return`?"))
+        error(errors.ReQLDriverError("Anonymous function returned `nil`. Did you forget a `return`?"))
       end
-      local argsArr = MakeArray({ }, unpack(argNums))
-      return _parent_0.__init(self, optargs, argsArr, body)
+      optargs.arity = nil
+      local args_arr = MakeArray({ }, unpack(arg_nums))
+      _parent_0.__init(self, optargs, args_arr, body)
     end,
     __base = _base_0,
     __name = "Func",
@@ -4919,7 +4523,7 @@ do
   })
   _base_0.__class = _class_0
   local self = _class_0
-  self.nextVarId = 0
+  self.next_var_id = 0
   if _parent_0.__inherited then
     _parent_0.__inherited(_parent_0, _class_0)
   end
@@ -4928,15 +4532,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.ASC,
+    tt = proto_term_type.ASC,
     st = 'asc'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Asc",
     __parent = _parent_0
@@ -4964,15 +4565,12 @@ end
 do
   local _parent_0 = RDBOpWrap
   local _base_0 = {
-    tt = protoTermType.DESC,
+    tt = proto_term_type.DESC,
     st = 'desc'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Desc",
     __parent = _parent_0
@@ -5000,15 +4598,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.LITERAL,
+    tt = proto_term_type.LITERAL,
     st = 'literal'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Literal",
     __parent = _parent_0
@@ -5036,15 +4631,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.ISO8601,
+    tt = proto_term_type.ISO8601,
     st = 'iso8601'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ISO8601",
     __parent = _parent_0
@@ -5072,15 +4664,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TO_ISO8601,
+    tt = proto_term_type.TO_ISO8601,
     mt = 'to_iso8601'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ToISO8601",
     __parent = _parent_0
@@ -5108,15 +4697,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.EPOCH_TIME,
+    tt = proto_term_type.EPOCH_TIME,
     st = 'epoch_time'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "EpochTime",
     __parent = _parent_0
@@ -5144,15 +4730,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TO_EPOCH_TIME,
+    tt = proto_term_type.TO_EPOCH_TIME,
     mt = 'to_epoch_time'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ToEpochTime",
     __parent = _parent_0
@@ -5180,15 +4763,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.NOW,
+    tt = proto_term_type.NOW,
     st = 'now'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Now",
     __parent = _parent_0
@@ -5216,15 +4796,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.IN_TIMEZONE,
+    tt = proto_term_type.IN_TIMEZONE,
     mt = 'in_timezone'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "InTimezone",
     __parent = _parent_0
@@ -5252,15 +4829,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DURING,
+    tt = proto_term_type.DURING,
     mt = 'during'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "During",
     __parent = _parent_0
@@ -5288,15 +4862,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DATE,
+    tt = proto_term_type.DATE,
     mt = 'date'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ReQLDate",
     __parent = _parent_0
@@ -5324,15 +4895,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TIME_OF_DAY,
+    tt = proto_term_type.TIME_OF_DAY,
     mt = 'time_of_day'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "TimeOfDay",
     __parent = _parent_0
@@ -5360,15 +4928,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TIMEZONE,
+    tt = proto_term_type.TIMEZONE,
     mt = 'timezone'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Timezone",
     __parent = _parent_0
@@ -5396,15 +4961,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.YEAR,
+    tt = proto_term_type.YEAR,
     mt = 'year'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Year",
     __parent = _parent_0
@@ -5432,15 +4994,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MONTH,
+    tt = proto_term_type.MONTH,
     mt = 'month'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Month",
     __parent = _parent_0
@@ -5468,15 +5027,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DAY,
+    tt = proto_term_type.DAY,
     mt = 'day'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Day",
     __parent = _parent_0
@@ -5504,15 +5060,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DAY_OF_WEEK,
+    tt = proto_term_type.DAY_OF_WEEK,
     mt = 'day_of_week'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DayOfWeek",
     __parent = _parent_0
@@ -5540,15 +5093,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DAY_OF_YEAR,
+    tt = proto_term_type.DAY_OF_YEAR,
     mt = 'day_of_year'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "DayOfYear",
     __parent = _parent_0
@@ -5576,15 +5126,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.HOURS,
+    tt = proto_term_type.HOURS,
     mt = 'hours'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Hours",
     __parent = _parent_0
@@ -5612,15 +5159,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MINUTES,
+    tt = proto_term_type.MINUTES,
     mt = 'minutes'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Minutes",
     __parent = _parent_0
@@ -5648,15 +5192,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SECONDS,
+    tt = proto_term_type.SECONDS,
     mt = 'seconds'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Seconds",
     __parent = _parent_0
@@ -5684,15 +5225,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TIME,
+    tt = proto_term_type.TIME,
     st = 'time'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Time",
     __parent = _parent_0
@@ -5720,15 +5258,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GEOJSON,
+    tt = proto_term_type.GEOJSON,
     mt = 'geojson'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "GeoJson",
     __parent = _parent_0
@@ -5756,15 +5291,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TO_GEOJSON,
+    tt = proto_term_type.TO_GEOJSON,
     mt = 'to_geojson'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ToGeoJson",
     __parent = _parent_0
@@ -5792,15 +5324,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.POINT,
+    tt = proto_term_type.POINT,
     mt = 'point'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Point",
     __parent = _parent_0
@@ -5828,15 +5357,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.LINE,
+    tt = proto_term_type.LINE,
     mt = 'line'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Line",
     __parent = _parent_0
@@ -5864,15 +5390,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.POLYGON,
+    tt = proto_term_type.POLYGON,
     mt = 'polygon'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Polygon",
     __parent = _parent_0
@@ -5900,15 +5423,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DISTANCE,
+    tt = proto_term_type.DISTANCE,
     mt = 'distance'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Distance",
     __parent = _parent_0
@@ -5936,15 +5456,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INTERSECTS,
+    tt = proto_term_type.INTERSECTS,
     mt = 'intersects'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Intersects",
     __parent = _parent_0
@@ -5972,15 +5489,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.INCLUDES,
+    tt = proto_term_type.INCLUDES,
     mt = 'includes'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Includes",
     __parent = _parent_0
@@ -6008,15 +5522,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.CIRCLE,
+    tt = proto_term_type.CIRCLE,
     mt = 'circle'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Circle",
     __parent = _parent_0
@@ -6044,15 +5555,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GET_INTERSECTING,
+    tt = proto_term_type.GET_INTERSECTING,
     mt = 'get_intersecting'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "GetIntersecting",
     __parent = _parent_0
@@ -6080,15 +5588,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.GET_NEAREST,
+    tt = proto_term_type.GET_NEAREST,
     mt = 'get_nearest'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "GetNearest",
     __parent = _parent_0
@@ -6116,15 +5621,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FILL,
+    tt = proto_term_type.FILL,
     mt = 'fill'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Fill",
     __parent = _parent_0
@@ -6152,15 +5654,12 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.UUID,
+    tt = proto_term_type.UUID,
     st = 'uuid'
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "UUID",
     __parent = _parent_0
@@ -6190,59 +5689,33 @@ end
 -- All top level exported functions
 
 -- Wrap a native Lua value in an ReQL datum
-function rethinkdb.expr(val, nestingDepth)
-  if nestingDepth == nil then
-    nestingDepth = 20
+function rethinkdb.expr(val, nesting_depth, optargs)
+  if nesting_depth == nil then
+    nesting_depth = 20
   end
-  if not (val) then
-    error(err.ReQLDriverError("Cannot wrap nil with r.expr()."))
+  if nesting_depth <= 0 then
+    error(errors.ReQLDriverError("Nesting depth limit exceeded"))
   end
-  if nestingDepth <= 0 then
-    error(err.ReQLDriverError("Nesting depth limit exceeded"))
-  end
-  if type(nestingDepth) ~= "number" or nestingDepth == (1/0) * 0 or nestingDepth == 1/0 or nestingDepth == -1/0 then
-    error(err.ReQLDriverError("Second argument to `r.expr` must be a number or nil."))
-  end
-  if TermBase.__class == val then
-    return val
+  if type(nesting_depth) ~= "number" then
+    error(errors.ReQLDriverError("Second argument to `r.expr` must be a number or nil."))
   end
   if type(val) == "function" then
-    return Func({ }, val)
+    return Func(optargs, val)
   end
-  if nil then
-    return ISO8601({ }, val.toISOString())
+  if is_instance(TermBase, val) then
+    return val
   end
-  if nil then
-    return Binary(val)
-  end
-  if type(val) == "tree" then
-    local t = nil
-    for i, v in ipairs(val) do
-      if t == "dict" and type(i) == "number" then
-        error("")
-      end
-      if t == "array" and type(i) == "string" then
-        error("")
-      end
-      if not t then
-        if type(i) == "number" then
-          t = "array"
-        else
-          if type(i) == "string" then
-            t = "dict"
-          else
-            error("")
-          end
-        end
-      end
+  if type(val) == 'table' then
+    if type(val.build) == 'function' then
+      return val
     end
-    if t == "dict" then
-      return MakeObject(val, nestingDepth)
+    if is_array(val) then
+      for i, v in ipairs(val) do
+        val[i] = rethinkdb.expr(v, nesting_depth - 1)
+      end
+      return MakeArray(optargs, unpack(val))
     end
-    for i, v in ipairs(val) do
-      val[i] = rethinkdb.expr(v, nestingDepth - 1)
-    end
-    return MakeArray({ }, unpack(val))
+    return MakeObject(val, nesting_depth)
   end
   return DatumTerm(val)
 end
@@ -6261,24 +5734,13 @@ end
 function rethinkdb.random(...)
   -- Default if no opts dict provided
   local opts = { }
-  local limits = arg
+  local limits = {...}
 
   -- Look for opts dict
-  local perhapsOptDict = arg[arg.n - 1]
-  if perhapsOptDict and ((type(perhapsOptDict) == 'tree') and not (isinstance(TermBase, perhapsOptDict))) then
-    opts = perhapsOptDict
-    do
-      local _accum_0 = { }
-      local _len_0 = 1
-      local _list_0 = arg
-      local _max_0 = (arg.n - 1)
-      for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-        local a = _list_0[_index_0]
-        _accum_0[_len_0] = a
-        _len_0 = _len_0 + 1
-      end
-      limits = _accum_0
-    end
+  local perhaps_opt_dict = limits[limits.n]
+  if perhaps_opt_dict and ((type(perhaps_opt_dict) == 'table') and not (is_instance(TermBase, perhaps_opt_dict))) then
+    opts = perhaps_opt_dict
+    limits[limits.n] = nil
   end
   return Random(opts, unpack(limits))
 end
@@ -6286,8 +5748,8 @@ function rethinkdb.binary(data)
   return Binary(data)
 end
 rethinkdb.row = ImplicitVar({ })
-function rethinkdb.table(tblName, opts)
-  return Table(opts, tblName)
+function rethinkdb.table(tbl_name, opts)
+  return Table(opts, tbl_name)
 end
 function rethinkdb.db(...)
   return Db({ }, ...)
@@ -6301,8 +5763,8 @@ end
 function rethinkdb.db_list(...)
   return DbList({ }, ...)
 end
-function rethinkdb.table_create(tblName, opts)
-  return TableCreate(opts, tblName)
+function rethinkdb.table_create(tbl_name, opts)
+  return TableCreate(opts, tbl_name)
 end
 function rethinkdb.table_drop(...)
   return TableDrop({ }, ...)
@@ -6311,18 +5773,10 @@ function rethinkdb.table_list(...)
   return TableList({ }, ...)
 end
 function rethinkdb.do_(...)
-  return FunCall({ }, funcWrap(arg[arg.n]), unpack((function()
-    local _accum_0 = { }
-    local _len_0 = 1
-    local _list_0 = arg
-    local _max_0 = (arg.n - 1)
-    for _index_0 = 1, _max_0 < 0 and #_list_0 + _max_0 or _max_0 do
-      local a = _list_0[_index_0]
-      _accum_0[_len_0] = a
-      _len_0 = _len_0 + 1
-    end
-    return _accum_0
-  end)()))
+  args = {...}
+  func = func_wrap(args[args.n])
+  args[args.n] = nil
+  return FunCall({ }, func, unpack(args))
 end
 function rethinkdb.branch(...)
   return Branch({ }, ...)
@@ -6405,14 +5859,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MONDAY
+    tt = proto_term_type.MONDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Monday",
     __parent = _parent_0
@@ -6440,14 +5891,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.TUESDAY
+    tt = proto_term_type.TUESDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Tuesday",
     __parent = _parent_0
@@ -6475,14 +5923,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.WEDNESDAY
+    tt = proto_term_type.WEDNESDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Wednesday",
     __parent = _parent_0
@@ -6510,14 +5955,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.THURSDAY
+    tt = proto_term_type.THURSDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Thursday",
     __parent = _parent_0
@@ -6545,14 +5987,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FRIDAY
+    tt = proto_term_type.FRIDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Friday",
     __parent = _parent_0
@@ -6580,14 +6019,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SATURDAY
+    tt = proto_term_type.SATURDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Saturday",
     __parent = _parent_0
@@ -6615,14 +6051,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SUNDAY
+    tt = proto_term_type.SUNDAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "Sunday",
     __parent = _parent_0
@@ -6657,14 +6090,11 @@ rethinkdb.sunday = Sunday()
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.JANUARY
+    tt = proto_term_type.JANUARY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "January",
     __parent = _parent_0
@@ -6692,14 +6122,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.FEBRUARY
+    tt = proto_term_type.FEBRUARY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "February",
     __parent = _parent_0
@@ -6727,14 +6154,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MARCH
+    tt = proto_term_type.MARCH
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "March",
     __parent = _parent_0
@@ -6762,14 +6186,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.APRIL
+    tt = proto_term_type.APRIL
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "April",
     __parent = _parent_0
@@ -6797,14 +6218,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.MAY
+    tt = proto_term_type.MAY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "May",
     __parent = _parent_0
@@ -6832,14 +6250,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.JUNE
+    tt = proto_term_type.JUNE
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "June",
     __parent = _parent_0
@@ -6867,14 +6282,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.JULY
+    tt = proto_term_type.JULY
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "July",
     __parent = _parent_0
@@ -6902,14 +6314,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.AUGUST
+    tt = proto_term_type.AUGUST
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "August",
     __parent = _parent_0
@@ -6937,14 +6346,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.SEPTEMBER
+    tt = proto_term_type.SEPTEMBER
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "September",
     __parent = _parent_0
@@ -6972,14 +6378,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.OCTOBER
+    tt = proto_term_type.OCTOBER
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "October",
     __parent = _parent_0
@@ -7007,14 +6410,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.NOVEMBER
+    tt = proto_term_type.NOVEMBER
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "November",
     __parent = _parent_0
@@ -7042,14 +6442,11 @@ end
 do
   local _parent_0 = RDBOp
   local _base_0 = {
-    tt = protoTermType.DECEMBER
+    tt = proto_term_type.DECEMBER
   }
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "December",
     __parent = _parent_0

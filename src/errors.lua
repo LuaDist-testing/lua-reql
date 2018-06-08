@@ -1,12 +1,16 @@
 local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
 local ReQLClientError, ReQLQueryPrinter
+
+local convert_pseudotype, recursively_convert_pseudotype, mk_atom, mk_seq
+local is_array, is_instance
+
 do
   local _base_0 = { }
   _base_0.__index = _base_0
   local _class_0 = setmetatable({
     __init = function(self, msg)
       self.msg = msg
-      self.message = msg
+      self.message = self.__class.__name .. ' ' .. msg
     end,
     __base = _base_0,
     __name = "ReQLDriverError"
@@ -30,14 +34,14 @@ do
       self.frames = frames
       self.printer = ReQLQueryPrinter(term, frames)
       if term then
-        self.message = " in:\n" .. self.printer:printQuery() .. "\n" .. self.printer:printCarrots()
+        self.message = " in:\n" .. self.printer:print_query() .. "\n" .. self.printer:print_carrots()
         if msg[-1] == '.' then
-          self.message = msg:sub(1, -2) .. self.message
+          self.message = self.__class.__name .. ' ' .. msg:sub(1, -2) .. self.message
         else
-          self.message = msg .. self.message
+          self.message = self.__class.__name .. ' ' .. msg .. self.message
         end
       else
-        self.message = msg
+        self.message = self.__class.__name .. ' ' .. msg
       end
     end,
     __base = _base_0,
@@ -59,9 +63,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ReQLRuntimeError",
     __parent = _parent_0
@@ -92,9 +93,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ReQLCompileError",
     __parent = _parent_0
@@ -125,9 +123,6 @@ do
   _base_0.__index = _base_0
   setmetatable(_base_0, _parent_0.__base)
   local _class_0 = setmetatable({
-    __init = function(self, ...)
-      return _parent_0.__init(self, ...)
-    end,
     __base = _base_0,
     __name = "ReQLClientError",
     __parent = _parent_0
@@ -154,47 +149,48 @@ do
 end
 do
   local _base_0 = {
-    printQuery = function(self)
-      return self:joinTree(self:composeTerm(self.term))
+    print_query = function(self)
+      return self:join_tree(self:compose_term(self.term))
     end,
-    printCarrots = function(self)
+    print_carrots = function(self)
       local tree
       if #self.frames == 0 then
         tree = {
-          self:carrotify(self:composeTerm(self.term))
+          self:carrotify(self:compose_term(self.term))
         }
       else
-        tree = self:composeCarrots(self.term, self.frames)
+        tree = self:compose_carrots(self.term, self.frames)
       end
-      return self:joinTree(tree).gsub('[^\^]', ' ')
+      return self:join_tree(tree):gsub('[^%^]', ' ')
     end,
-    composeTerm = function(self, term)
+    compose_term = function(self, term)
+      if type(term) ~= 'table' then return '' .. term end
       local args = {}
       for i, arg in ipairs(term.args) do
-        args[i] = self:composeTerm(arg)
+        args[i] = self:compose_term(arg)
       end
       local optargs = { }
       for key, arg in ipairs(term.optargs) do
-        optargs[key] = self:composeTerm(arg)
+        optargs[key] = self:compose_term(arg)
       end
       return term:compose(args, optargs)
     end,
-    composeCarrots = function(self, term, frames)
-      local frame = frames.shift()
+    compose_carrots = function(self, term, frames)
+      local frame = table.remove(frames, 1)
       local args = {}
       for arg, i in ipairs(term.args) do
         if frame == i then
-          args[i] = self:composeCarrots(arg, frames)
+          args[i] = self:compose_carrots(arg, frames)
         else
-          args[i] = self:composeTerm(arg)
+          args[i] = self:compose_term(arg)
         end
       end
       local optargs = { }
       for key, arg in ipairs(term.optargs) do
         if frame == key then
-          optargs[key] = self:composeCarrots(arg, frames)
+          optargs[key] = self:compose_carrots(arg, frames)
         else
-          optargs[key] = self:composeTerm(arg)
+          optargs[key] = self:compose_term(arg)
         end
       end
       if frame then
@@ -202,18 +198,18 @@ do
       end
       return self:carrotify(term.compose(args, optargs))
     end,
-    carrotMarker = { },
+    carrot_marker = { },
     carrotify = function(self, tree)
-      return {carrotMarker, tree}
+      return {carrot_marker, tree}
     end,
-    joinTree = function(self, tree)
+    join_tree = function(self, tree)
       local str = ''
       for _, term in ipairs(tree) do
-        if Array.isArray(term) then
-          if #term == 2 and term[0] == self.carrotMarker then
-            str = str .. self:joinTree(term[1]).gsub('.', '^')
+        if type(term) == 'table' then
+          if #term == 2 and term[0] == self.carrot_marker then
+            str = str .. self:join_tree(term[1]):gsub('.', '^')
           else
-            str = str .. self:joinTree(term)
+            str = str .. self:join_tree(term)
           end
         else
           str = str .. term
@@ -242,9 +238,114 @@ do
   local self = _class_0
   ReQLQueryPrinter = _class_0
 end
+
+function convert_pseudotype(obj, opts)
+  -- An R_OBJECT may be a regular object or a "pseudo-type" so we need a
+  -- second layer of type switching here on the obfuscated field "$reql_type$"
+  local _exp_0 = obj['$reql_type$']
+  if 'TIME' == _exp_0 then
+    local _exp_1 = opts.time_format
+    if 'native' == _exp_1 or not _exp_1 then
+      if not (obj['epoch_time']) then
+        error(err.ReQLDriverError("pseudo-type TIME " .. tostring(obj) .. " object missing expected field 'epoch_time'."))
+      end
+
+      -- We ignore the timezone field of the pseudo-type TIME object. JS dates do not support timezones.
+      -- By converting to a native date object we are intentionally throwing out timezone information.
+
+      -- field "epoch_time" is in seconds but the Date constructor expects milliseconds
+      return (Date(obj['epoch_time'] * 1000))
+    elseif 'raw' == _exp_1 then
+      -- Just return the raw (`{'$reql_type$'...}`) object
+      return obj
+    else
+      error(err.ReQLDriverError("Unknown time_format run option " .. tostring(opts.time_format) .. "."))
+    end
+  elseif 'GROUPED_DATA' == _exp_0 then
+    local _exp_1 = opts.group_format
+    if 'native' == _exp_1 or not _exp_1 then
+      -- Don't convert the data into a map, because the keys could be objects which doesn't work in JS
+      -- Instead, we have the following format:
+      -- [ { 'group': <group>, 'reduction': <value(s)> } }, ... ]
+      res = {}
+      j = 1
+      for i, v in ipairs(obj['data']) do
+        res[j] = {
+          group = i,
+          reduction = v
+        }
+        j = j + 1
+      end
+      obj = res
+    elseif 'raw' == _exp_1 then
+      return obj
+    else
+      error(err.ReQLDriverError("Unknown group_format run option " .. tostring(opts.group_format) .. "."))
+    end
+  elseif 'BINARY' == _exp_0 then
+    local _exp_1 = opts.binary_format
+    if 'native' == _exp_1 or not _exp_1 then
+      if not (obj['data']) then
+        error(err.ReQLDriverError("pseudo-type BINARY object missing expected field 'data'."))
+      end
+      return (Buffer(obj['data'], 'base64'))
+    elseif 'raw' == _exp_1 then
+      return obj
+    else
+      error(err.ReQLDriverError("Unknown binary_format run option " .. tostring(opts.binary_format) .. "."))
+    end
+  else
+    -- Regular object or unknown pseudo type
+    return obj
+  end
+end
+
+function recursively_convert_pseudotype(obj, opts)
+  if type(obj) == 'table' then
+    for key, value in pairs(obj) do
+      obj[key] = recursively_convert_pseudotype(value, opts)
+    end
+    obj = convert_pseudotype(obj, opts)
+  end
+  return obj
+end
+
+function mk_atom(response, opts)
+  return recursively_convert_pseudotype(response.r[0], opts)
+end
+
+function mk_seq(response, opts)
+  return recursively_convert_pseudotype(response.r, opts)
+end
+
+function is_array(obj)
+  if type(obj) ~= 'table' or (obj[1] == nil) then return false end
+  for k, v in pairs(obj) do
+    if type(k) ~= 'number' then return false end
+  end
+  return true
+end
+
+function is_instance(class, obj)
+  if type(obj) ~= 'table' then return false end
+  local obj_cls = obj.__class
+  while obj_cls do
+    if obj_cls.__name == class.__name then
+      return true
+    end
+    obj_cls = obj_cls.__parent
+  end
+  return false
+end
+
 return {
   ReQLDriverError = ReQLDriverError,
   ReQLRuntimeError = ReQLRuntimeError,
   ReQLCompileError = ReQLCompileError,
   ReQLClientError = ReQLClientError,
+  mk_atom = mk_atom,
+  mk_seq = mk_seq,
+  recursively_convert_pseudotype = recursively_convert_pseudotype,
+  is_array = is_array,
+  is_instance = is_instance
 }
