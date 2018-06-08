@@ -847,14 +847,6 @@ r.connect = class(
       elseif host_or_callback then
         host = host_or_callback
       end
-      local cb = function(err, conn)
-        if callback then
-          local res = callback(err, conn)
-          conn:close({noreply_wait = false})
-          return res
-        end
-        return conn, err
-      end
       self.weight = 0
       self.host = host.host or self.DEFAULT_HOST
       self.port = host.port or self.DEFAULT_PORT
@@ -863,10 +855,20 @@ r.connect = class(
       self.timeout = host.timeout or self.DEFAULT_TIMEOUT
       self.outstanding_callbacks = {}
       self.next_token = 1
-      self.open = false
       self.buffer = ''
       if self.raw_socket then
         self:close({noreply_wait = false})
+      end
+      return self:_connect(callback)
+    end,
+    _connect = function(self, callback)
+      local cb = function(err, conn)
+        if callback then
+          local res = callback(err, conn)
+          conn:close({noreply_wait = false})
+          return res
+        end
+        return conn, err
       end
       self.raw_socket = r._socket()
       self.raw_socket:settimeout(self.timeout)
@@ -896,7 +898,6 @@ r.connect = class(
             self.buffer = self.buffer:sub(i + 1)
             if status_str == 'SUCCESS' then
               -- We're good, finish setting up the connection
-              self.open = true
               return cb(nil, self)
             end
             return cb(ReQLDriverError('Server dropped connection with message: \'' .. status_str .. '\''))
@@ -920,6 +921,7 @@ r.connect = class(
         )
         buf = buf or partial
         if (not buf) and err then
+          self:close({noreply_wait = false})
           return self:_process_response(
             {
               t = --[[Response.CLIENT_ERROR]],
@@ -950,6 +952,7 @@ r.connect = class(
     end,
     _del_query = function(self, token)
       -- This query is done, delete this cursor
+      if not self.outstanding_callbacks[token] then return end
       if self.outstanding_callbacks[token].cursor then
         if self.outstanding_callbacks[token].cursor._type ~= 'finite' then
           self.weight = self.weight - 2
@@ -985,21 +988,29 @@ r.connect = class(
       end
 
       function wrapped_cb(err)
-        self.open = false
-        self.raw_socket:shutdown()
-        self.raw_socket:close()
+        if self.raw_socket then
+          self.raw_socket:shutdown()
+          self.raw_socket:close()
+          self.raw_socket = nil
+        end
         if cb then
           return cb(err)
         end
         return nil, err
       end
 
-      local noreply_wait = (opts.noreply_wait ~= false) and self.open
+      local noreply_wait = (opts.noreply_wait ~= false) and self:open()
 
       if noreply_wait then
         return self:noreply_wait(wrapped_cb)
       end
       return wrapped_cb()
+    end,
+    open = function(self)
+      if self.raw_socket then
+        return true
+      end
+      return false
     end,
     noreply_wait = function(self, callback)
       local cb = function(err, cur)
@@ -1018,7 +1029,7 @@ r.connect = class(
         end
         return callback(err)
       end
-      if not self.open then
+      if not self:open() then
         return cb(ReQLDriverError('Connection is closed.'))
       end
 
@@ -1033,7 +1044,7 @@ r.connect = class(
       self.outstanding_callbacks[token] = {cursor = cursor}
 
       -- Construct query
-      self:_send_query(token, {--[[Query.NOREPLY_WAIT]]})
+      self:_write_socket(token, {--[[Query.NOREPLY_WAIT]]})
 
       return cb(nil, cursor)
     end,
@@ -1045,7 +1056,7 @@ r.connect = class(
         callback = opts_or_callback
       end
       return self:close(opts, function()
-        return r.connect(self, callback)
+        return self:_connect(callback)
       end)
     end,
     use = function(self, db)
@@ -1064,8 +1075,8 @@ r.connect = class(
         cur:close()
         return res
       end
-      if not self.open then
-        cb(ReQLDriverError('Connection is closed.'))
+      if not self:open() then
+        return cb(ReQLDriverError('Connection is closed.'))
       end
 
       -- Assign token
@@ -1093,23 +1104,29 @@ r.connect = class(
       -- Construct query
       local query = {--[[Query.START]], term:build(), global_opts}
 
+      local idx, err = self:_write_socket(token, query)
+      if err then
+        self:close({noreply_wait = false}, function(err)
+          if err then return cb(err) end
+          return cb(ReQLDriverError('Connection is closed.'))
+        end)
+      end
       local cursor = Cursor(self, token, opts, term)
-
       -- Save cursor
       self.outstanding_callbacks[token] = {cursor = cursor}
-      self:_send_query(token, query)
       return cb(nil, cursor)
     end,
     _continue_query = function(self, token)
-      self:_send_query(token, {--[[Query.CONTINUE]]})
+      self:_write_socket(token, {2})
     end,
     _end_query = function(self, token)
       self:_del_query(token)
-      self:_send_query(token, {--[[Query.STOP]]})
+      self:_write_socket(token, {3})
     end,
-    _send_query = function(self, token, query)
+    _write_socket = function(self, token, query)
+      if not self.raw_socket then return nil, 'closed' end
       local data = r._encode(query)
-      self.raw_socket:send(
+      return self.raw_socket:send(
         int_to_bytes(token, 8) ..
         int_to_bytes(#data, 4) ..
         data
@@ -1133,10 +1150,10 @@ r.pool = class(
         end
         return pool, err
       end
-      self.open = false
+      self._open = false
       return r.connect(host, function(err, conn)
         if err then return cb(err) end
-        self.open = true
+        self._open = true
         self.pool = {conn}
         self.size = host.size or 12
         self.host = host
@@ -1156,8 +1173,16 @@ r.pool = class(
       for _, conn in pairs(self.pool) do
         conn:close(opts, cb)
       end
-      self.open = false
+      self._open = false
       if callback then return callback(err) end
+    end,
+    open = function(self)
+      if not self._open then return false end
+      for _, conn in ipairs(self.pool) do
+        if conn:open() then return true end
+      end
+      self._open = false
+      return false
     end,
     _start = function(self, term, callback, opts)
       local weight = math.huge
@@ -1171,8 +1196,8 @@ r.pool = class(
       for i=1, self.size do
         if not self.pool[i] then self.pool[i] = r.connect(self.host) end
         local conn = self.pool[i]
-        if not conn.open then
-          conn = conn:reconnect()
+        if not conn:open() then
+          conn:reconnect()
           self.pool[i] = conn
         end
         if conn.weight < weight then
