@@ -1,34 +1,27 @@
+import util
+
+
+class TestControl(util.LuaTestCase):
+    def setUp(self):
+        self.create_table('control.func')
+
+    def test_do_mul(self):
+        self.expect('test_control_do_mul', [2])
+
+    def test_do_append(self):
+        self.expect('test_control_do_append', [[0, 1, 2, 3]])
+
+    def test_do_add(self):
+        self.expect('test_control_do_add', [3])
+
+    def test_do(self):
+        self.expect('test_control_do', [1])
+
+
+if __name__ == '__main__':
+    unittest.main()
 '''
-desc: Tests RQL control flow structures
-table_variable_name: tbl
-tests:
-
-    # Setup a second table
-    - cd: r.db('test').table_create('test2')
-      ot: ({'created':1})
-      def: tbl2 = r.db('test').table('test2')
-
     ## FunCall
-
-    - py: "r.expr(1).do(lambda v: v * 2)"
-      js: r.expr(1).do(function(v) { return v.mul(2); })
-      rb: r.expr(1).do{|v| v * 2 }
-      ot: 2
-
-    - py: "r.expr([0, 1, 2]).do(lambda v: v.append(3))"
-      js: r([0, 1, 2]).do(function(v) { return v.append(3); })
-      rb: r([0, 1, 2]).do{ |v| v.append(3) }
-      ot: [0, 1, 2, 3]
-
-    - py: "r.do(1, 2, lambda x, y: x + y)"
-      js: r.do(1, 2, function(x, y) { return x.add(y); })
-      rb: r.do(1, 2) {|x, y| x + y}
-      ot: 3
-
-    - py: "r.do(lambda: 1)"
-      js: r.do(function() { return 1; })
-      rb: r.do{1}
-      ot: 1
 
     # do error cases
     - py: "r.do(1, 2, lambda x: x)"
