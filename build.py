@@ -1,3 +1,8 @@
+import sys
+if sys.version_info[0] < 3:
+    print('Support for building with Python2 is not provided.')
+    exit(0)
+
 import argparse
 import os
 import struct
@@ -90,8 +95,8 @@ def build(args):
     }
     ast_method_names = {
         name: {
-            'BRACKET': 'index', 'FUNCALL': 'do_', 'JAVASCRIPT': 'js',
-            'MAKE_ARRAY': 'array', 'NOT': 'not_'
+            'BRACKET': 'index', 'ERROR': 'error_', 'FUNCALL': 'do_',
+            'JAVASCRIPT': 'js', 'MAKE_ARRAY': 'array', 'NOT': 'not_'
         }.get(name, name.lower())
         for name in ast_constants
     }

@@ -126,31 +126,24 @@ function class(name, parent, base)
 end
 
 function intsp(seq)
-  if seq[1] == nil then
-    return {}
-  end
-  local res = {seq[1]}
-  for i=2, #seq do
-    table.insert(res, ', ')
-    table.insert(res, seq[i])
+  local res = {}
+  local sep = ''
+  for _, v in ipairs(seq) do
+    table.insert(res, {sep, v})
+    sep = ', '
   end
   return res
 end
 
 function kved(optargs)
-  return {
-    '{',
-    intsp((function()
-      local _accum_0 = {}
-      local i = 1
-      for k, v in pairs(optargs) do
-        _accum_0[i] = {k, ': ', v}
-        i = i + 1
-      end
-      return _accum_0
-    end)()),
-    '}'
-  }
+  local res = {'{'}
+  local sep = ''
+  for k, v in pairs(optargs) do
+    table.insert(res, {sep, k, ': ', v})
+    sep = ', '
+  end
+  table.insert(res, '}')
+  return res
 end
 
 function intspallargs(args, optargs)
@@ -429,7 +422,10 @@ class_methods = {
       end
     elseif self.tt == --[[Term.FUNCALL]] then
       local func = table.remove(args)
-      table.insert(args, 1, Func({arity = #args}, func))
+      if type(func) == 'function' then
+        func = Func({arity = #args}, func)
+      end
+      table.insert(args, 1, func)
     elseif self.tt == --[[Term.REDUCE]] then
       args[#args] = Func({arity = 2}, args[#args])
     end
@@ -482,49 +478,10 @@ class_methods = {
       return kved(optargs)
     end
     if self.tt == --[[Term.VAR]] then
-      if not args then return {} end
-      for i, v in ipairs(args) do
-        args[i] = 'var_' .. v
-      end
-      return args
+      return {'var_' .. args[1]}
     end
-    if self.tt == --[[Term.BINARY]] then
-      if self.args[1] then
-        return {
-          'r.binary(',
-          intspallargs(args, optargs),
-          ')'
-        }
-      else
-        return 'r.binary(<data>)'
-      end
-    end
-    if self.tt == --[[Term.IMPLICIT_VAR]] then
-      return {
-        'r.row'
-      }
-    end
-    if self.tt == --[[Term.TABLE]] then
-      if is_instance(self.args[1], 'Db') then
-        return {
-          args[1],
-          ':table(',
-          intspallargs((function()
-            local _accum_0 = {}
-            for _index_0 = 2, #args do
-              _accum_0[_index_0 - 1] = args[_index_0]
-            end
-            return _accum_0
-          end)(), optargs),
-          ')'
-        }
-      else
-        return {
-          'r.table(',
-          intspallargs(args, optargs),
-          ')'
-        }
-      end
+    if self.tt == --[[Term.BINARY]] and not self.args[1] then
+      return 'r.binary(<data>)'
     end
     if self.tt == --[[Term.BRACKET]] then
       return {
@@ -537,61 +494,32 @@ class_methods = {
     if self.tt == --[[Term.FUNC]] then
       return {
         'function(',
-        intsp(args[1]),
+        intsp((function()
+          local _accum_0 = {}
+          for i, v in ipairs(self.args[1]) do
+            _accum_0[i] = 'var_' .. v
+          end
+          return _accum_0
+        end)()),
         ') return ',
         args[2],
         ' end'
       }
     end
     if self.tt == --[[Term.FUNCALL]] then
-      if #args > 2 then
-        return {
-          'r.do_(',
-          intsp((function()
-            local _accum_0 = {}
-            for i = 2, #args do
-              _accum_0[i - 1] = args[i]
-            end
-            return _accum_0
-          end)()),
-          ', ',
-          args[1],
-          ')'
-        }
+      local func = table.remove(args, 1)
+      if func then
+        table.insert(args, func)
       end
-      if should_wrap(self.args[1]) then
-        args[1] = {
-          'r(',
-          args[1],
-          ')'
-        }
-      end
-      return {
-        args[2],
-        '.do_(',
-        args[1],
-        ')'
-      }
     end
-    if should_wrap(self.args[1]) then
-      args[1] = {
-        'r(',
-        args[1],
-        ')'
+    if not self.args then
+      return {
+        type(self)
       }
     end
     return {
-      args[1],
-      ':',
-      self.st,
-      '(',
-      intspallargs((function()
-        local _accum_0 = {}
-        for _index_0 = 2, #args do
-          _accum_0[_index_0 - 1] = args[_index_0]
-        end
-        return _accum_0
-      end)(), optargs),
+      'r.' .. self.st .. '(',
+      intspallargs(args, optargs),
       ')'
     }
   end,
@@ -640,7 +568,7 @@ DatumTerm = ast(
   {
     __init = function(self, val)
       if type(val) == 'number' then
-        if math.abs(val) == math.huge or '' .. val == 'nan' then
+        if math.abs(val) == math.huge or val ~= val then
           error('Illegal non-finite number `' .. val .. '`.')
         end
       end
@@ -703,7 +631,6 @@ Cursor = class(
     -- Implement IterableResult
     next = function(self, callback)
       local cb = function(err, row)
-        if type(err) == 'number' then error('' .. err) end
         return callback(err, row)
       end
       -- Try to get a row out of the responses
