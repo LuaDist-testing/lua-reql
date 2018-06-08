@@ -1,40 +1,13 @@
-import sys
-if sys.version_info[0] < 3:
-    print('Support for building with Python2 is not provided.')
-    exit(0)
-
-import argparse
 import os
-import struct
+import re
+import string
 import subprocess
 
-
-def spec(args):
-    if not args.f:
-        lint(args)
-
-    import time
-
-    io = subprocess.Popen(
-        'rethinkdb', cwd='spec',
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    time.sleep(4)
-    res = subprocess.call('busted')
-    io.terminate()
-    io.wait()
-    exit(res)
+import ReQLprotodef as protodef
 
 
-def clean(args):
-    import shutil
-    shutil.rmtree('__pycache__', ignore_errors=True)
-    shutil.rmtree('spec/rethinkdb_data', ignore_errors=True)
-
-
-def lint(args):
-    if not args.f:
-        build(args)
+def lint():
+    build()
 
     print('linting rethinkdb.lua')
 
@@ -53,27 +26,16 @@ def lint(args):
     print('linting successful')
 
 
-def build(args):
-    import re
-    import string
-
-    import ReQLprotodef as protodef
-
+def build():
     print('building rethinkdb.lua')
 
-    name_re = re.compile('(^|_)(\w)')
-    ast_constants = {
+    ast_constants = list({
         term for term in dir(protodef.Term.TermType)
-        if not term.startswith('__')
-    } - {'DATUM', 'IMPLICIT_VAR'}
-    ast_class_names = {
-        name: {
-            'FUNCALL': 'Do', 'ISO8601': 'ISO8601',
-            'JAVASCRIPT': 'JavaScript', 'TO_ISO8601': 'ToISO8601',
-            'UUID': 'UUID'
-        }.get(name, name_re.sub(lambda m: m.group(2).upper(), name.lower()))
-        for name in ast_constants
-    }
+        if not term.startswith('_')
+    } - {'DATUM', 'IMPLICIT_VAR'})
+
+    ast_constants.sort()
+
     ast_method_names = {
         name: {
             'BRACKET': 'index', 'ERROR': 'error_', 'FUNCALL': 'do_',
@@ -83,11 +45,23 @@ def build(args):
     }
     ast_classes = [
         '{0} = ast({0!r}, {{tt = {1}, st = {2!r}}})'.format(
-            ast_class_names[name],
+            name,
             getattr(protodef.Term.TermType, name),
             ast_method_names[name]
         ) for name in ast_constants
     ]
+
+    def const_args(num):
+        args = ['arg{}'.format(n) for n in range(num)]
+        pieces = [
+            '{} = function(',
+            ', '.join(args + ['opts']),
+            ') return {}(',
+            ', '.join(['opts'] + args),
+            ') end'
+        ]
+        return ''.join(pieces)
+
     ast_methods_w_opt = dict(
         {
             name: '{} = function(...) return {}(get_opts(...)) end'
@@ -99,43 +73,30 @@ def build(args):
                 'TABLE_CREATE', 'UPDATE'
             )
         },
-        BETWEEN=
-        '{} = function(self, left, right, opts) return {}(opts, self, left, right) end',
-        DISTANCE='{} = function(self, g, opts) return {}(opts, self, g) end',
-        DURING=
-        '{} = function(t1, t2, t3, opts) return {}(opts, t1, t2, t3) end',
-        FILTER='{} = function(self, pred, opts) return {}(opts, self, pred) end',
-        INSERT='{} = function(tbl, doc, opts) return {}(opts, tbl, doc) end',
-        UPDATE='{} = function(tbl, doc, opts) return {}(opts, tbl, doc) end'
+        BETWEEN=const_args(3),
+        DISTANCE=const_args(2),
+        DURING=const_args(3),
+        FILTER=const_args(2),
+        INSERT=const_args(2),
+        UPDATE=const_args(2)
     )
     ast_methods = [
         ast_methods_w_opt.get(
-            name,
-            '{} = function(...) return {}({{}}, ...) end'
+            name, '{} = function(...) return {}({{}}, ...) end'
         ).format(
-            ast_method_names[name],
-            ast_class_names[name]
+            ast_method_names[name], name
         ) for name in ast_constants
     ]
 
-    ast_class_names = list(ast_class_names.values())
-    ast_class_names.sort(reverse=True)
+    ast_constants.reverse()
 
-    lines = ['local {}'.format(ast_class_names.pop())]
-    while ast_class_names:
-        name = ast_class_names.pop()
+    lines = ['local {}'.format(ast_constants.pop())]
+    while ast_constants:
+        name = ast_constants.pop()
         if len(lines[-1]) + len(name) < 77:
             lines[-1] += ', {}'.format(name)
         else:
             lines.append('local {}'.format(name))
-
-    ast_classes.sort()
-    ast_methods.sort()
-
-    def encode_magic(num):
-        return "'\\{}'".format('\\'.join(map(str, struct.pack(
-            "<L", num
-        ))))
 
     class BuildFormat(string.Formatter):
         fspec = re.compile('--\[\[(.+?)\]\]')
@@ -153,11 +114,9 @@ def build(args):
         'AstClasses': '\n'.join(ast_classes),
         'AstMethods': ',\n  '.join(ast_methods),
         'AstNames': '\n'.join(lines),
-        'Protocol': encode_magic(protodef.VersionDummy.Protocol.JSON),
         'Query': protodef.Query.QueryType,
         'Response': protodef.Response.ResponseType,
         'Term': protodef.Term.TermType,
-        'Version': encode_magic(protodef.VersionDummy.Version.V0_3)
     })
     with open('src/rethinkdb.lua', 'w') as io:
         io.write(s)
@@ -165,32 +124,5 @@ def build(args):
     print('building successful')
 
 
-def install(args):
-    if not args.f:
-        lint(args)
-
-    returncode = subprocess.call(['luarocks', 'make'])
-    if returncode:
-        exit(returncode)
-
-    print('install successful')
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Build Lua-ReQL.')
-
-    parser.add_argument('action', nargs='?', default='spec')
-    parser.add_argument('-f', action='store_true')
-
-    args = parser.parse_args()
-
-    {
-        'spec': spec,
-        'lint': lint,
-        'clean': clean,
-        'install': install,
-        'build': build
-    }[args.action](args)
-
 if __name__ == '__main__':
-    main()
+    lint()
