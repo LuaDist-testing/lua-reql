@@ -3,16 +3,15 @@ local mime = require('mime')
 local socket = require('socket')
 
 -- r is both the main export table for the module
--- and a function that wraps a native Lua value in an ReQL datum
+-- and a function that wraps a native Lua value in a ReQL datum
 local r = {}
 
-local Connection, Cursor
 local DatumTerm, ReQLOp
 --[[AstNames]]
 local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
 local ReQLClientError, ReQLQueryPrinter, ReQLError
 
-function is_instance(obj, ...)
+function r.is_instance(obj, ...)
   local class_list = {...}
 
   for _, cls in ipairs(class_list) do
@@ -21,7 +20,7 @@ function is_instance(obj, ...)
         return true
       end
     else
-      class = class.__name
+      cls = cls.__name
     end
 
     if type(obj) == 'table' then
@@ -49,7 +48,7 @@ setmetatable(r, {
     if nesting_depth <= 0 then
       error('Nesting depth limit exceeded')
     end
-    if is_instance(val, 'ReQLOp') then
+    if r.is_instance(val, 'ReQLOp') then
       return val
     end
     if type(val) == 'function' then
@@ -69,10 +68,6 @@ setmetatable(r, {
     return DatumTerm(val)
   end
 })
-
-function should_wrap(arg)
-  return is_instance(arg, 'DatumTerm', 'MakeArray', 'MakeObj')
-end
 
 function class(name, parent, base)
   local index, init
@@ -164,7 +159,7 @@ function get_opts(...)
   local args = {...}
   local opt = {}
   local pos_opt = args[#args]
-  if (type(pos_opt) == 'table') and (not is_instance(pos_opt, 'ReQLOp')) then
+  if (type(pos_opt) == 'table') and (not r.is_instance(pos_opt, 'ReQLOp')) then
     opt = pos_opt
     args[#args] = nil
   end
@@ -180,15 +175,13 @@ function bytes_to_int(str)
   return n
 end
 
-function div_mod(num, den)
-  return math.floor(num / den), math.fmod(num, den)
-end
-
 function int_to_bytes(num, bytes)
   local res = {}
   local mul = 0
-  for k=bytes,1,-1 do
-    res[k], num = div_mod(num, 2 ^ (8 * (k - 1)))
+  for k = bytes, 1, -1 do
+    local den = 2 ^ (8 * (k - 1))
+    res[k] = math.floor(num / den)
+    num = math.fmod(num, den)
   end
   return string.char(unpack(res))
 end
@@ -375,7 +368,7 @@ ast_methods = {
     end
     -- else we suppose that we have run(connection[, options][, callback])
 
-    if not is_instance(connection, 'Connection') then
+    if not r.is_instance(connection, 'Connection', 'Pool') then
       if callback then
         return callback(ReQLDriverError('First argument to `run` must be a connection.'))
       end
@@ -414,7 +407,7 @@ class_methods = {
       args = {{unpack(arg_nums)}, func}
     elseif self.tt == --[[Term.BINARY]] then
       local data = args[1]
-      if is_instance(data, 'ReQLOp') then
+      if r.is_instance(data, 'ReQLOp') then
       elseif type(data) == 'string' then
         self.base64_data = mime.b64(table.remove(args, 1))
       else
@@ -594,7 +587,7 @@ DatumTerm = ast(
 
 --[[AstClasses]]
 
-Cursor = class(
+local Cursor = class(
   'Cursor',
   {
     __init = function(self, conn, token, opts, root)
@@ -604,7 +597,6 @@ Cursor = class(
       self._root = root -- current query
       self._responses = {}
       self._response_index = 1
-      self._cont_flag = true
     end,
     _add_response = function(self, response)
       local t = response.t
@@ -616,29 +608,16 @@ Cursor = class(
         -- We got an error, SUCCESS_SEQUENCE, WAIT_COMPLETE, or a SUCCESS_ATOM
         self._end_flag = true
         self._conn:_del_query(self._token)
-      end
-      self._cont_flag = false
-    end,
-    _prompt_cont = function(self)
-      if self._end_flag then return end
-      -- Let's ask the server for more data if we haven't already
-      if not self._cont_flag then
-        self._cont_flag = true
+      else
         self._conn:_continue_query(self._token)
       end
-      self._conn:_get_response(self._token)
+      while (self._cb and self._responses[1]) do
+        self:_run_cb(self._cb)
+      end
     end,
-    -- Implement IterableResult
-    next = function(self, callback)
+    _run_cb = function(self, callback)
       local cb = function(err, row)
         return callback(err, row)
-      end
-      -- Try to get a row out of the responses
-      while not self._responses[1] do
-        if self._end_flag then
-          return cb(ReQLDriverError('No more rows in the cursor.'))
-        end
-        self:_prompt_cont()
       end
       local response = self._responses[1]
       -- Behavior varies considerably based on response type
@@ -666,20 +645,46 @@ Cursor = class(
         end
 
         return cb(err, row)
-      elseif t == --[[Response.COMPILE_ERROR]] then
+      end
+      self:clear()
+      if t == --[[Response.COMPILE_ERROR]] then
         return cb(ReQLCompileError(response.r[1], self._root, response.b))
       elseif t == --[[Response.CLIENT_ERROR]] then
         return cb(ReQLClientError(response.r[1], self._root, response.b))
       elseif t == --[[Response.RUNTIME_ERROR]] then
         return cb(ReQLRuntimeError(response.r[1], self._root, response.b))
       elseif t == --[[Response.WAIT_COMPLETE]] then
-        return cb(nil, nil)
+        return cb()
       end
       return cb(ReQLDriverError('Unknown response type ' .. t))
+    end,
+    set = function(self, callback)
+      self._cb = callback
+    end,
+    clear = function(self)
+      self._cb = nil
+    end,
+    -- Implement IterableResult
+    next = function(self, callback)
+      local cb = function(err, row)
+        return callback(err, row)
+      end
+      if self._cb then
+        return cb(ReQLDriverError('Use `cur:clear()` before `cur:next`.'))
+      end
+      -- Try to get a row out of the responses
+      while not self._responses[1] do
+        if self._end_flag then
+          return cb(ReQLDriverError('No more rows in the cursor.'))
+        end
+        self._conn:_get_response(self._token)
+      end
+      return self:_run_cb(cb)
     end,
     close = function(self, callback)
       if not self._end_flag then
         self._conn:_end_query(self._token)
+        self._end_flag = true
       end
       if callback then return callback() end
     end,
@@ -709,7 +714,7 @@ Cursor = class(
       return self:next(next_cb)
     end,
     to_array = function(self, callback)
-      if not self._type then self:_prompt_cont() end
+      if not self._type then self._conn:_get_response(self._token) end
       if self._type == --[[Response.SUCCESS_FEED]] then
         return cb(ReQLDriverError('`to_array` is not available for feeds.'))
       end
@@ -729,7 +734,7 @@ Cursor = class(
   }
 )
 
-Connection = class(
+r.connect = class(
   'Connection',
   {
     __init = function(self, host_or_callback, callback)
@@ -738,7 +743,7 @@ Connection = class(
         callback = host_or_callback
       elseif type(host_or_callback) == 'string' then
         host = {host = host_or_callback}
-      else
+      elseif host_or_callback then
         host = host_or_callback
       end
       local cb = function(err, conn)
@@ -758,7 +763,6 @@ Connection = class(
       self.next_token = 1
       self.open = false
       self.buffer = ''
-      self._events = self._events or {}
       if self.raw_socket then
         self:close({
           noreply_wait = false
@@ -924,7 +928,7 @@ Connection = class(
         callback = opts_or_callback
       end
       return self:close(opts, function()
-        return Connection(self, callback)
+        return r.connect(self, callback)
       end)
     end,
     use = function(self, db)
@@ -992,23 +996,58 @@ Connection = class(
   }
 )
 
--- Add connect
-r.connect = function(...)
-  return Connection(...)
-end
-
--- Export ReQL Errors
-r.error = {
-  ReQLError = ReQLError,
-  ReQLDriverError = ReQLDriverError,
-  ReQLServerError = ReQLServerError,
-  ReQLRuntimeError = ReQLRuntimeError,
-  ReQLCompileError = ReQLCompileError,
-  ReQLClientError = ReQLClientError
-}
-
--- Export class introspection
-r.is_instance = is_instance
+r.pool = class(
+  'Pool',
+  {
+    __init = function(self, host, callback)
+      local cb = function(err, pool)
+        if callback then
+          local res = callback(err, pool)
+          pool:close({noreply_wait = false})
+          return res
+        end
+        return pool, err
+      end
+      self.open = false
+      conn, err = r.connect(host)
+      if err then return cb(err) end
+      self.open = true
+      self.pool = {conn}
+      self.size = host.size or 12
+      self.host = host
+      for i=2, self.size do
+        table.insert(self.pool, (r.connect(host)))
+      end
+      return cb(nil, self)
+    end,
+    close = function(self, opts, callback)
+      local cb = function(err)
+        if err and callback then
+          callback(err)
+        end
+      end
+      for _, conn in pairs(self.pool) do
+        conn:close(opts, cb)
+      end
+      self.open = false
+      if callback then return callback() end
+    end,
+    _start = function(self, term, callback, opts)
+      local wear = math.huge
+      local good_conn
+      for i=1, self.size do
+        if not self.pool[i] then self.pool[i] = r.connect(self.host) end
+        local conn = self.pool[i]
+        if not conn.open then conn:reconnect() end
+        if conn.next_token < wear then
+          good_conn = conn
+          wear = conn.next_token
+        end
+      end
+      return conn:_start(term, callback, opts)
+    end
+  }
+)
 
 -- Export all names defined on r
 return r
