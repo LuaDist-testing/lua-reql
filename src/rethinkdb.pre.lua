@@ -143,11 +143,11 @@ end
 
 function intspallargs(args, optargs)
   local argrepr = {}
-  if #args > 0 then
+  if next(args) then
     table.insert(argrepr, intsp(args))
   end
-  if optargs and #optargs > 0 then
-    if #argrepr > 0 then
+  if optargs and next(optargs) then
+    if next(argrepr) then
       table.insert(argrepr, ', ')
     end
     table.insert(argrepr, kved(optargs))
@@ -283,10 +283,10 @@ ReQLQueryPrinter = class(
     end,
     print_query = function(self)
       local carrots
-      if #self.frames == 0 then
-        carrots = {self:carrotify(self:compose_term(self.term))}
-      else
+      if next(self.frames) then
         carrots = self:compose_carrots(self.term, self.frames)
+      else
+        carrots = {self:carrotify(self:compose_term(self.term))}
       end
       carrots = self:join_tree(carrots):gsub('[^%^]', '')
       return self:join_tree(self:compose_term(self.term)) .. '\n' .. carrots
@@ -369,10 +369,14 @@ ast_methods = {
     -- else we suppose that we have run(connection[, options][, callback])
 
     if not r.is_instance(connection, 'Connection', 'Pool') then
-      if callback then
-        return callback(ReQLDriverError('First argument to `run` must be a connection.'))
+      if r._pool then
+        connection = r._pool
+      else
+        if callback then
+          return callback(ReQLDriverError('First argument to `run` must be a connection.'))
+        end
+        error('First argument to `run` must be a connection.')
       end
-      error('First argument to `run` must be a connection.')
     end
 
     return connection:_start(self, callback, options or {})
@@ -450,7 +454,7 @@ class_methods = {
       args[i] = arg:build()
     end
     res = {self.tt, args}
-    if #self.optargs > 0 then
+    if next(self.optargs) then
       local opts = {}
       for key, val in pairs(self.optargs) do
         opts[key] = val:build()
@@ -754,6 +758,7 @@ r.connect = class(
         end
         return conn, err
       end
+      self.weight = 0
       self.host = host.host or self.DEFAULT_HOST
       self.port = host.port or self.DEFAULT_PORT
       self.db = host.db -- left nil if this is not set
@@ -776,7 +781,7 @@ r.connect = class(
         -- Initialize connection with magic number to validate version
         self.raw_socket:send(
           --[[Version]] ..
-          int_to_bytes(#self.auth_key, 4) ..
+          int_to_bytes(#(self.auth_key), 4) ..
           self.auth_key ..
           --[[Protocol]]
         )
@@ -831,7 +836,7 @@ r.connect = class(
         end
         self.buffer = self.buffer .. buf
         if response_length > 0 then
-          if #self.buffer >= response_length then
+          if #(self.buffer) >= response_length then
             local response_buffer = string.sub(self.buffer, 1, response_length)
             self.buffer = string.sub(self.buffer, response_length + 1)
             response_length = 0
@@ -839,7 +844,7 @@ r.connect = class(
             if token == reqest_token then return end
           end
         else
-          if #self.buffer >= 12 then
+          if #(self.buffer) >= 12 then
             token = bytes_to_int(self.buffer:sub(1, 8))
             response_length = bytes_to_int(self.buffer:sub(9, 12))
             self.buffer = self.buffer:sub(13)
@@ -849,6 +854,9 @@ r.connect = class(
     end,
     _del_query = function(self, token)
       -- This query is done, delete this cursor
+      if self.outstanding_callbacks[token].cursor then
+        self.weight = self.weight - 1
+      end
       self.outstanding_callbacks[token].cursor = nil
     end,
     _process_response = function(self, response, token)
@@ -896,6 +904,7 @@ r.connect = class(
     end,
     noreply_wait = function(self, callback)
       local cb = function(err, cur)
+        self.weight = 0
         if cur then
           return cur.next(function(err) return callback(err) end)
         end
@@ -937,7 +946,7 @@ r.connect = class(
     _start = function(self, term, callback, opts)
       local cb = function(err, cur)
         local res
-        if type(callback) == 'function' and not opts.noreply then
+        if type(callback) == 'function' then
           res = callback(err, cur)
         else
           if err then
@@ -954,6 +963,7 @@ r.connect = class(
       -- Assign token
       local token = self.next_token
       self.next_token = self.next_token + 1
+      self.weight = self.weight + 1
 
       -- Set global options
       local global_opts = {}
@@ -966,6 +976,10 @@ r.connect = class(
         global_opts.db = r.db(opts.db):build()
       elseif self.db then
         global_opts.db = r.db(self.db):build()
+      end
+
+      if type(callback) ~= 'function' then
+        global_opts.noreply = true
       end
 
       -- Construct query
@@ -1001,6 +1015,9 @@ r.pool = class(
   {
     __init = function(self, host, callback)
       local cb = function(err, pool)
+        if not r._pool then
+          r._pool = pool
+        end
         if callback then
           local res = callback(err, pool)
           pool:close({noreply_wait = false})
@@ -1021,30 +1038,35 @@ r.pool = class(
       return cb(nil, self)
     end,
     close = function(self, opts, callback)
-      local cb = function(err)
-        if err and callback then
-          callback(err)
+      local err
+      local cb = function(e)
+        if e then
+          err = e
         end
       end
       for _, conn in pairs(self.pool) do
         conn:close(opts, cb)
       end
       self.open = false
-      if callback then return callback() end
+      if callback then return callback(err) end
     end,
     _start = function(self, term, callback, opts)
-      local wear = math.huge
+      local weight = math.huge
       local good_conn
+      if opts.conn then
+        weight = -1
+        good_conn = self.pool[opts.conn]
+      end
       for i=1, self.size do
         if not self.pool[i] then self.pool[i] = r.connect(self.host) end
         local conn = self.pool[i]
         if not conn.open then conn:reconnect() end
-        if conn.next_token < wear then
+        if conn.weight < weight then
           good_conn = conn
-          wear = conn.next_token
+          weight = conn.weight
         end
       end
-      return conn:_start(term, callback, opts)
+      return good_conn:_start(term, callback, opts)
     end
   }
 )
