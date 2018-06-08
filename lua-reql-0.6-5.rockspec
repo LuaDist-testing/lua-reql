@@ -1,16 +1,16 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = 'Lua-ReQL'
-version = '0.6-1'
+version = '0.6-5'
 -- LuaDist source
 source = {
-  tag = "0.6-1",
+  tag = "0.6-5",
   url = "git://github.com/LuaDist-testing/lua-reql.git"
 }
 -- Original source
 -- source = {
 --   url = 'git://github.com/grandquista/Lua-ReQL',
---   tag = 'v0.6.1',
+--   tag = 'v0.6.x',
 -- }
 description = {
   summary = 'A Lua driver for RethinkDB.',
@@ -18,9 +18,9 @@ description = {
   license = 'Apache',
 }
 dependencies = {
-  'lua >= 5.1, < 5.3',
-  'luasocket ~> 3.0',
-  'luajson ~> 1.3',
+  'lua > 5.1',
+  'luasocket ~> 3',
+  'luajson ~> 1',
 }
 build = {
   type = 'builtin',
