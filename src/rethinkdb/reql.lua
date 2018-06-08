@@ -11,7 +11,7 @@
 local errors = require'rethinkdb.errors'
 local protodef = require'rethinkdb.internal.protodef'
 
-local unpack = _G.unpack or table.unpack
+local unpack = _G.unpack or table.unpack  -- luacheck: read globals table.unpack
 
 local Term = protodef.Term
 
@@ -378,11 +378,11 @@ function m.init(r)
   function reql_meta_table.__call(reql, val, nesting_depth)
     nesting_depth = nesting_depth or 20
     if nesting_depth <= 0 then
-      return nil, errors.ReQLDriverError(r, 'Nesting depth limit exceeded')  -- @todo
+      return nil, errors.ReQLDriverError(r, 'Nesting depth limit exceeded')
     end
     local continue = continue_reql[type(val)]
     if not continue then
-      return nil, errors.ReQLDriverError(r, 'Unknown Lua type ' .. type(val))  -- @todo
+      return nil, errors.ReQLDriverError(r, 'Unknown Lua type ' .. type(val))
     end
     return continue(r, reql, val, nesting_depth)
   end

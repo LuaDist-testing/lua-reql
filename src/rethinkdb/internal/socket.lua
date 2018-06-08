@@ -4,47 +4,59 @@
 -- @license Apache
 -- @copyright Adam Grandquist 2016
 
+local errors = require'rethinkdb.errors'
 local ssl = require('ssl')
+local socket_sink = require('socket').sink
+local socket_source = require('socket').source
+
+local function settimeout(socket, ...)
+  return pcall(socket.settimeout, socket, ...)
+end
 
 local function socket(r, host, port, ssl_params, timeout)
-  local raw_socket, init_err = r.tcp()
+  local raw_socket, err = r.tcp()
 
   if not raw_socket then
-    return nil, init_err
+    return nil, errors.ReQLDriverError(r, err .. ': opening socket')
   end
 
-  raw_socket:settimeout(timeout)
-
-  local status
-
-  status, init_err = raw_socket:connect(host, port)
+  local status = settimeout(raw_socket, timeout, 't') and
+    settimeout(raw_socket, timeout, 'b') or
+    settimeout(raw_socket, timeout)
 
   if not status then
-    return nil, init_err
+    return nil, errors.ReQLDriverError(r, 'Failed to set timeout')
+  end
+
+  status, err = raw_socket:connect(host, port)
+
+  if not status then
+    return nil, errors.ReQLDriverError(r, err .. ': connecting socket')
   end
 
   if ssl_params then
-    raw_socket, init_err = ssl.wrap(raw_socket, ssl_params)
+    raw_socket, err = ssl.wrap(raw_socket, ssl_params)
 
     if not raw_socket then
-      return nil, init_err
+      return nil, errors.ReQLDriverError(r, err .. ': wrapping socket in ssl')
     end
 
     status = false
     while not status do
-      status, init_err = raw_socket:dohandshake()
-      if init_err == 'closed' then
-        return nil, init_err
+      status, err = raw_socket:dohandshake()
+      if err == 'closed' then
+        return nil, errors.ReQLDriverError(
+          r, 'socket closed durring ssl handshake')
       end
     end
   end
 
   local socket_inst = {}
 
-  socket_inst.sink = r.socket.sink('keep-open', raw_socket)
+  socket_inst.sink = socket_sink('keep-open', raw_socket)
 
-  function socket_inst.source(_r, length)
-    return _r.socket.source('by-length', raw_socket, length)
+  function socket_inst.source(length)
+    return socket_source('by-length', raw_socket, length)
   end
 
   function socket_inst.close()
