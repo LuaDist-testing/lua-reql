@@ -1,32 +1,49 @@
-local json = require('json')
 local mime = require('mime')
 local socket = require('socket')
 
 -- r is both the main export table for the module
 -- and a function that wraps a native Lua value in a ReQL datum
-local r = {}
+local r = {
+  json_parser = require('json'),
+  logger = function(err)
+    if type(err) == 'string' then
+      error(err)
+    elseif type(err) == 'table' and err.msg then
+      error(err.msg)
+    else
+      error('Unknown error type from driver')
+    end
+  end
+}
+
+function r._logger(err)
+  if r.logger then
+    r.logger(err)
+  end
+end
 
 local DatumTerm, ReQLOp
 local Add, All, Any, Append, April, Args, Asc, August, Avg, Between, Binary
 local Bracket, Branch, ChangeAt, Changes, Circle, CoerceTo, ConcatMap
-local Contains, Count, Date, Day, DayOfWeek, DayOfYear, Db, DbCreate, DbDrop
-local DbList, December, Default, Delete, DeleteAt, Desc, Difference, Distance
-local Distinct, Div, Do, Downcase, During, EpochTime, Eq, EqJoin, Error
-local February, Fill, Filter, ForEach, Friday, Func, Ge, Geojson, Get, GetAll
-local GetField, GetIntersecting, GetNearest, Group, Gt, HasFields, Hours, Http
-local ISO8601, InTimezone, Includes, IndexCreate, IndexDrop, IndexList
-local IndexRename, IndexStatus, IndexWait, IndexesOf, Info, InnerJoin, Insert
-local InsertAt, Intersects, IsEmpty, January, JavaScript, Json, July, June
-local Keys, Le, Limit, Line, Literal, Lt, MakeArray, MakeObj, Map, March
-local Match, Max, May, Merge, Min, Minutes, Mod, Monday, Month, Mul, Ne, Not
-local November, Now, Nth, Object, October, OrderBy, OuterJoin, Pluck, Point
-local Polygon, PolygonSub, Prepend, Random, Range, Reduce, Replace, Sample
-local Saturday, Seconds, September, SetDifference, SetInsert, SetIntersection
-local SetUnion, Skip, Slice, SpliceAt, Split, Sub, Sum, Sunday, Sync, Table
-local TableCreate, TableDrop, TableList, Thursday, Time, TimeOfDay, Timezone
-local ToEpochTime, ToGeojson, ToISO8601, ToJsonString, Tuesday, TypeOf, UUID
-local Ungroup, Union, Upcase, Update, Var, Wednesday, WithFields, Without
-local Year, Zip
+local Contains, Count, Date, Day, DayOfWeek, DayOfYear, Db, DbConfig, DbCreate
+local DbDrop, DbList, December, Default, Delete, DeleteAt, Desc, Difference
+local Distance, Distinct, Div, Do, Downcase, During, EpochTime, Eq, EqJoin
+local Error, February, Fill, Filter, ForEach, Friday, Func, Ge, Geojson, Get
+local GetAll, GetField, GetIntersecting, GetNearest, Group, Gt, HasFields
+local Hours, Http, ISO8601, InTimezone, Includes, IndexCreate, IndexDrop
+local IndexList, IndexRename, IndexStatus, IndexWait, IndexesOf, Info
+local InnerJoin, Insert, InsertAt, Intersects, IsEmpty, January, JavaScript
+local Json, July, June, Keys, Le, Limit, Line, Literal, Lt, MakeArray, MakeObj
+local Map, March, Match, Max, May, Merge, Min, Minutes, Mod, Monday, Month
+local Mul, Ne, Not, November, Now, Nth, Object, October, OrderBy, OuterJoin
+local Pluck, Point, Polygon, PolygonSub, Prepend, Random, Range, Rebalance
+local Reconfigure, Reduce, Replace, Sample, Saturday, Seconds, September
+local SetDifference, SetInsert, SetIntersection, SetUnion, Skip, Slice
+local SpliceAt, Split, Sub, Sum, Sunday, Sync, Table, TableConfig, TableCreate
+local TableDrop, TableList, TableStatus, TableWait, Thursday, Time, TimeOfDay
+local Timezone, ToEpochTime, ToGeojson, ToISO8601, ToJsonString, Tuesday
+local TypeOf, UUID, Ungroup, Union, Upcase, Update, Var, Wednesday, WithFields
+local Without, Year, Zip
 local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
 local ReQLClientError, ReQLQueryPrinter, ReQLError
 
@@ -62,12 +79,12 @@ setmetatable(r, {
       nesting_depth = 20
     end
     if type(nesting_depth) ~= 'number' then
-      error('Second argument to `r(val, nesting_depth)` must be a number.')
+      return r._logger('Second argument to `r(val, nesting_depth)` must be a number.')
     end
     if nesting_depth <= 0 then
-      error('Nesting depth limit exceeded')
+      return r._logger('Nesting depth limit exceeded')
     end
-    if r.is_instance(val, 'ReQLOp') then
+    if r.is_instance(val, 'ReQLOp') and type(val.build) == 'function' then
       return val
     end
     if type(val) == 'function' then
@@ -83,6 +100,16 @@ setmetatable(r, {
         return MakeArray({}, unpack(val))
       end
       return MakeObj(val)
+    end
+    if type(val) == 'userdata' then
+      val = pcall(tostring, val)
+      r._logger('Found userdata inserting "' .. val .. '" into query')
+      return DatumTerm(val)
+    end
+    if type(val) == 'thread' then
+      val = pcall(tostring, val)
+      r._logger('Cannot insert thread object into query ' .. val)
+      return nil
     end
     return DatumTerm(val)
   end
@@ -213,7 +240,7 @@ function convert_pseudotype(obj, opts)
     local time_format = opts.time_format
     if 'native' == time_format or not time_format then
       if not (obj['epoch_time']) then
-        error(ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
+        return r._logger(ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
       end
 
       -- We ignore the timezone field of the pseudo-type TIME table. JS dates do not support timezones.
@@ -224,7 +251,7 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == time_format then
       return obj
     else
-      error(ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
+      return r._logger(ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
     end
   elseif 'GROUPED_DATA' == reql_type then
     local group_format = opts.group_format
@@ -243,19 +270,19 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == group_format then
       return obj
     else
-      error(ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
+      return r._logger(ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
     end
   elseif 'BINARY' == reql_type then
     local binary_format = opts.binary_format
     if 'native' == binary_format or not binary_format then
       if not obj.data then
-        error(ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
+        return r._logger(ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
       end
       return mime.unb64(obj.data)
     elseif 'raw' == binary_format then
       return obj
     else
-      error(ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
+      return r._logger(ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
     end
   else
     -- Regular table or unknown pseudo type
@@ -270,7 +297,11 @@ function recursively_convert_pseudotype(obj, opts)
     end
     obj = convert_pseudotype(obj, opts)
   end
-  if obj == json.util.null then return nil end
+  if r.json_parser.null then
+    if obj == r.json_parser.null then return nil end
+  elseif r.json_parser.util then
+    if obj == r.json_parser.util.null then return nil end
+  end
   return obj
 end
 
@@ -380,7 +411,7 @@ ast_methods = {
     -- Handle run(connection, callback)
     if type(options) == 'function' then
       if callback then
-        return error('Second argument to `run` cannot be a function if a third argument is provided.')
+        return r._logger('Second argument to `run` cannot be a function if a third argument is provided.')
       end
       callback = options
       options = {}
@@ -394,7 +425,7 @@ ast_methods = {
         if callback then
           return callback(ReQLDriverError('First argument to `run` must be a connection.'))
         end
-        error('First argument to `run` must be a connection.')
+        return r._logger('First argument to `run` must be a connection.')
       end
     end
 
@@ -424,6 +455,7 @@ ast_methods = {
   day_of_week = function(...) return DayOfWeek({}, ...) end,
   day_of_year = function(...) return DayOfYear({}, ...) end,
   db = function(...) return Db({}, ...) end,
+  db_config = function(...) return DbConfig({}, ...) end,
   db_create = function(...) return DbCreate({}, ...) end,
   db_drop = function(...) return DbDrop({}, ...) end,
   db_list = function(...) return DbList({}, ...) end,
@@ -519,6 +551,8 @@ ast_methods = {
   prepend = function(...) return Prepend({}, ...) end,
   random = function(...) return Random(get_opts(...)) end,
   range = function(...) return Range({}, ...) end,
+  rebalance = function(...) return Rebalance({}, ...) end,
+  reconfigure = function(...) return Reconfigure({}, ...) end,
   reduce = function(...) return Reduce({}, ...) end,
   replace = function(...) return Replace(get_opts(...)) end,
   sample = function(...) return Sample({}, ...) end,
@@ -538,9 +572,12 @@ ast_methods = {
   sunday = function(...) return Sunday({}, ...) end,
   sync = function(...) return Sync({}, ...) end,
   table = function(...) return Table(get_opts(...)) end,
+  table_config = function(...) return TableConfig({}, ...) end,
   table_create = function(...) return TableCreate(get_opts(...)) end,
   table_drop = function(...) return TableDrop({}, ...) end,
   table_list = function(...) return TableList({}, ...) end,
+  table_status = function(...) return TableStatus({}, ...) end,
+  table_wait = function(...) return TableWait({}, ...) end,
   thursday = function(...) return Thursday({}, ...) end,
   time = function(...) return Time({}, ...) end,
   time_of_day = function(...) return TimeOfDay({}, ...) end,
@@ -585,7 +622,7 @@ class_methods = {
       end
       func = func(unpack(anon_args))
       if func == nil then
-        error('Anonymous function returned `nil`. Did you forget a `return`?')
+        return r._logger('Anonymous function returned `nil`. Did you forget a `return`?')
       end
       optargs.arity = nil
       args = {{unpack(arg_nums)}, func}
@@ -595,7 +632,7 @@ class_methods = {
       elseif type(data) == 'string' then
         self.base64_data = mime.b64(table.remove(args, 1))
       else
-        error('Parameter to `r.binary` must be a string or ReQL query.')
+        return r._logger('Parameter to `r.binary` must be a string or ReQL query.')
       end
     elseif self.tt == 64 then
       local func = table.remove(args)
@@ -746,7 +783,7 @@ DatumTerm = ast(
     __init = function(self, val)
       if type(val) == 'number' then
         if math.abs(val) == math.huge or val ~= val then
-          error('Illegal non-finite number `' .. val .. '`.')
+          return r._logger('Illegal non-finite number `' .. val .. '`.')
         end
       end
       self.data = val
@@ -758,6 +795,12 @@ DatumTerm = ast(
         return '"' .. self.data .. '"'
       end
       if self.data == nil then
+        if r.json_parser.null then
+          return r.json_parser.null
+        end
+        if r.json_parser.util then
+          return r.json_parser.util.null
+        end
         return 'nil'
       end
       return '' .. self.data
@@ -794,6 +837,7 @@ Day = ast('Day', {tt = 130, st = 'day'})
 DayOfWeek = ast('DayOfWeek', {tt = 131, st = 'day_of_week'})
 DayOfYear = ast('DayOfYear', {tt = 132, st = 'day_of_year'})
 Db = ast('Db', {tt = 14, st = 'db'})
+DbConfig = ast('DbConfig', {tt = 178, st = 'db_config'})
 DbCreate = ast('DbCreate', {tt = 57, st = 'db_create'})
 DbDrop = ast('DbDrop', {tt = 58, st = 'db_drop'})
 DbList = ast('DbList', {tt = 59, st = 'db_list'})
@@ -888,6 +932,8 @@ PolygonSub = ast('PolygonSub', {tt = 171, st = 'polygon_sub'})
 Prepend = ast('Prepend', {tt = 80, st = 'prepend'})
 Random = ast('Random', {tt = 151, st = 'random'})
 Range = ast('Range', {tt = 173, st = 'range'})
+Rebalance = ast('Rebalance', {tt = 179, st = 'rebalance'})
+Reconfigure = ast('Reconfigure', {tt = 176, st = 'reconfigure'})
 Reduce = ast('Reduce', {tt = 37, st = 'reduce'})
 Replace = ast('Replace', {tt = 55, st = 'replace'})
 Sample = ast('Sample', {tt = 81, st = 'sample'})
@@ -907,9 +953,12 @@ Sum = ast('Sum', {tt = 145, st = 'sum'})
 Sunday = ast('Sunday', {tt = 113, st = 'sunday'})
 Sync = ast('Sync', {tt = 138, st = 'sync'})
 Table = ast('Table', {tt = 15, st = 'table'})
+TableConfig = ast('TableConfig', {tt = 174, st = 'table_config'})
 TableCreate = ast('TableCreate', {tt = 60, st = 'table_create'})
 TableDrop = ast('TableDrop', {tt = 61, st = 'table_drop'})
 TableList = ast('TableList', {tt = 62, st = 'table_list'})
+TableStatus = ast('TableStatus', {tt = 175, st = 'table_status'})
+TableWait = ast('TableWait', {tt = 177, st = 'table_wait'})
 Thursday = ast('Thursday', {tt = 110, st = 'thursday'})
 Time = ast('Time', {tt = 136, st = 'time'})
 TimeOfDay = ast('TimeOfDay', {tt = 126, st = 'time_of_day'})
@@ -1035,10 +1084,10 @@ local Cursor = class(
     end,
     each = function(self, callback, on_finished)
       if type(callback) ~= 'function' then
-        error('First argument to each must be a function.')
+        return r._logger('First argument to each must be a function.')
       end
       if on_finished and type(on_finished) ~= 'function' then
-        error('Optional second argument to each must be a function.')
+        return r._logger('Optional second argument to each must be a function.')
       end
       local cb = function(row)
         return callback(row)
@@ -1181,7 +1230,7 @@ r.connect = class(
             local response_buffer = string.sub(self.buffer, 1, response_length)
             self.buffer = string.sub(self.buffer, response_length + 1)
             response_length = 0
-            self:_process_response(json.decode(response_buffer), token)
+            self:_process_response(r.json_parser.decode(response_buffer), token)
             if token == reqest_token then return end
           end
         else
@@ -1204,7 +1253,7 @@ r.connect = class(
       local cursor = self.outstanding_callbacks[token]
       if not cursor then
         -- Unexpected token
-        error('Unexpected token ' .. token .. '.')
+        return r._logger('Unexpected token ' .. token .. '.')
       end
       cursor = cursor.cursor
       if cursor then
@@ -1216,7 +1265,7 @@ r.connect = class(
       local cb
       if callback then
         if type(opts_or_callback) ~= 'table' then
-          error('First argument to two-argument `close` must be a table.')
+          return r._logger('First argument to two-argument `close` must be a table.')
         end
         opts = opts_or_callback
         cb = callback
@@ -1291,7 +1340,7 @@ r.connect = class(
           res = callback(err, cur)
         else
           if err then
-            error(err.message)
+            return r._logger(err.message)
           end
         end
         cur:close()
@@ -1341,7 +1390,7 @@ r.connect = class(
       self:_send_query(token, {3})
     end,
     _send_query = function(self, token, query)
-      local data = json.encode(query)
+      local data = r.json_parser.encode(query)
       self.raw_socket:send(
         int_to_bytes(token, 8) ..
         int_to_bytes(#data, 4) ..
